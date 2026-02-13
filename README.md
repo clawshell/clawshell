@@ -5,7 +5,7 @@
 > **Powered by Runta. The essential safety harness for OpenClaw's PII & API data.**
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/runta-dev/ClawShell)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/clawshell/clawshell)
 [![Version](https://img.shields.io/badge/version-0.0.1-orange.svg)]()
 
 ## 📖 Introduction
@@ -35,7 +35,7 @@ ClawShell scans HTTP request and response bodies for sensitive data using config
 
 - **Transparent Proxy**: Deploys alongside OpenClaw without requiring code changes — configure OpenClaw to point at ClawShell's address and it forwards all requests upstream.
 - **No External Dependencies**: Uses Unix file system permissions to protect secrets. No IdP, Vault, or external key management service required.
-- **SSE Streaming Pass-Through**: Proxies streaming responses without buffering.
+  
 
 ### 4. Ultra Lightweight and Scalable
 - Runs in under 10MB of memory.
