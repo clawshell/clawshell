@@ -128,13 +128,13 @@ sudo clawshell onboard
 
 ```bash
 # Start (daemonizes by default)
-clawshell start
+sudo clawshell start
 
 # Start in the foreground
-clawshell start --foreground
+sudo clawshell start --foreground
 
 # Start with a custom config file
-clawshell start -c /path/to/clawshell.toml
+sudo clawshell start -c /path/to/clawshell.toml
 
 # Check status
 clawshell status
@@ -145,8 +145,8 @@ clawshell logs --level error
 clawshell logs --follow
 
 # Restart / Stop
-clawshell restart
-clawshell stop
+sudo clawshell restart
+sudo clawshell stop
 ```
 
 By default ClawShell listens on `127.0.0.1:18790`.
@@ -156,8 +156,8 @@ By default ClawShell listens on `127.0.0.1:18790`.
 ClawShell reads its config from `/etc/clawshell/clawshell.toml`. You can view or edit it with:
 
 ```bash
-clawshell config          # print current config
-clawshell config --edit   # open in $EDITOR
+sudo clawshell config          # print current config
+sudo clawshell config --edit   # open in $EDITOR
 ```
 
 A minimal config looks like this:
