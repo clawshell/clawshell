@@ -6,11 +6,11 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/runta-dev/ClawShell)
-[![Version](https://img.shields.io/badge/version-1.0.0-orange.svg)]()
+[![Version](https://img.shields.io/badge/version-0.0.1-orange.svg)]()
 
 ## 📖 Introduction
 
-**ClawShell** is a security middleware proxy for the **OpenClaw** ecosystem. It sits between OpenClaw and upstream LLM API providers (OpenAI, Anthropic), performing virtual-to-real API key mapping and DLP (Data Loss Prevention) scanning on request and response bodies.
+**ClawShell** is a security privileged process for the **OpenClaw** ecosystem. It sits between OpenClaw and upstream LLM API providers (OpenAI, Anthropic), performing virtual-to-real API key mapping and DLP (Data Loss Prevention) scanning on request and response bodies.
 
 OpenClaw never holds real API keys — only virtual keys that ClawShell swaps for real ones before forwarding requests upstream. Real keys are stored in a privileged config directory (`/etc/clawshell`) protected by Unix file system permissions.
 
@@ -36,6 +36,10 @@ ClawShell scans HTTP request and response bodies for sensitive data using config
 - **Transparent Proxy**: Deploys alongside OpenClaw without requiring code changes — configure OpenClaw to point at ClawShell's address and it forwards all requests upstream.
 - **No External Dependencies**: Uses Unix file system permissions to protect secrets. No IdP, Vault, or external key management service required.
 - **SSE Streaming Pass-Through**: Proxies streaming responses without buffering.
+
+### 4. Ultra Lightweight and Scalable
+- Runs in under 10MB of memory.
+- Written in Rust with Tokio
 
 ## Architecture
 
