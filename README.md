@@ -5,14 +5,16 @@
 > **Powered by Runta. The essential safety harness for OpenClaw's PII & API data.**
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/clawshell/clawshell)
+
 [![Version](https://img.shields.io/badge/version-0.0.1-orange.svg)]()
 
 ## 📖 Introduction
 
-**ClawShell** is a security privileged process for the **OpenClaw** ecosystem. It sits between OpenClaw and upstream LLM API providers (OpenAI, Anthropic), performing virtual-to-real API key mapping and DLP (Data Loss Prevention) scanning on request and response bodies.
+**ClawShell** is a security-privileged process for the **OpenClaw** ecosystem. It sits between OpenClaw and upstream LLM API providers (OpenAI, Anthropic), performing virtual-to-real API key mapping and DLP (Data Loss Prevention) scanning on request and response bodies.
 
-OpenClaw never holds real API keys — only virtual keys that ClawShell swaps for real ones before forwarding requests upstream. Real keys are stored in a privileged config directory (`/etc/clawshell`) protected by Unix file system permissions.
+OpenClaw never holds real API keys, only virtual keys that ClawShell swaps for real ones before forwarding requests upstream. Real keys are stored in a privileged config directory (`/etc/clawshell`) protected by Unix file system permissions.
 
 ## Key Features
 
@@ -35,39 +37,37 @@ ClawShell scans HTTP request and response bodies for sensitive data using config
 
 - **Transparent Proxy**: Deploys alongside OpenClaw without requiring code changes — configure OpenClaw to point at ClawShell's address and it forwards all requests upstream.
 - **No External Dependencies**: Uses Unix file system permissions to protect secrets. No IdP, Vault, or external key management service required.
-  
 
 ### 4. Ultra Lightweight and Scalable
+
 - Runs in under 10MB of memory.
-- Written in Rust with Tokio
+- Written in Rust with Tokio.
 
 ## Architecture
 
 ```
                                ║ security boundary (Unix File System Permissions)
                                ║
-                               ║  ┌─────────────────-─┐
-                               ║  │  /etc/clawshell   │
-                               ║  │  ┄ real API keys  │
-                               ║  │  ┄ DLP patterns   │
-                               ║  └────────┬─────────-┘
+                               ║  ┌────────────────────┐
+                               ║  │  /etc/clawshell    │
+                               ║  │  ┄ real API keys   │
+                               ║  │  ┄ DLP patterns    │
+                               ║  └────────┬───────────┘
                                ║     reads │
-                               ║  ┌────────┴─────────-┐
-  ┌──────────────┐  REQUEST    ║  │                   │   REQUEST       ┌────────────┐
-  │              ├──(virtual───╫─►│    ClawShell      ├──-(real key,───►│            │
-  │   OpenClaw   │   key)      ║  │                   │   PII redacted) │   OpenAI   │
-  │              │             ║  │  DLP scan         │                 │     or     │
-  │ holds only   │  RESPONSE   ║  │  real-key mapping │   RESPONSE      │  Anthropic │
-  │ virtual keys │◄─-----------║◄─┤                   │◄─-----------────┤            │
-  │              │             ║  │                   │                 │            │
-  └──────────────┘             ║  └──────────────────-┘                 └────────────┘
+                               ║  ┌────────┴───────────┐
+  ┌──────────────┐  REQUEST    ║  │                    │   REQUEST       ┌────────────┐
+  │              ├──(virtual───╫─►│    ClawShell       ├──-(real key,───►│            │
+  │   OpenClaw   │   key)      ║  │                    │   PII redacted) │   OpenAI   │
+  │              │             ║  │  DLP scan          │                 │     or     │
+  │ holds only   │  RESPONSE   ║  │  real-key mapping  │   RESPONSE      │  Anthropic │
+  │ virtual keys │◄────────────║◄─┤                    │◄───────────────┤            │
+  │              │             ║  │                    │                 │            │
+  └──────────────┘             ║  └────────────────────┘                 └────────────┘
                                ║
 ```
 
-OpenClaw only holds virtual keys and cannot access the
-real API keys stored in the privileged config.
-ClawShell swaps virtual keys for real ones and
-scans for PII before forwarding requests upstream.
+OpenClaw only holds virtual keys and cannot access the real API keys stored in the privileged config.
+ClawShell swaps virtual keys for real ones and scans for PII before forwarding requests upstream.
 
 ## Installation
 
@@ -76,27 +76,27 @@ scans for PII before forwarding requests upstream.
 ```bash
 cargo install clawshell --locked
 
-# Require privilege to setup security boundary
+# Requires privilege to set up the security boundary
 sudo clawshell onboard
 ```
 
-## NPM
+### NPM
 
 ```bash
 npm install -g @clawshell/clawshell
 
-# Require privilege to setup security boundary
+# Requires privilege to set up the security boundary
 sudo clawshell onboard
 ```
 
-## Build from Source
+### Build from Source
 
 ```bash
 cargo build --release
 ls -al target/release/clawshell
 ```
 
-### Cross-compile on Linux/arm64
+#### Cross-compile on Linux/arm64
 
 ```bash
 wget https://musl.cc/x86_64-linux-musl-cross.tgz -O /tmp/musl-cross.tgz
@@ -104,3 +104,106 @@ tar -xzf /tmp/musl-cross.tgz -C /tmp
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="/tmp/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc" \
 cargo build --release --target x86_64-unknown-linux-musl
 ```
+
+
+
+## Usage
+
+### Onboarding
+
+The `onboard` command is an interactive setup wizard that must be run with `sudo`. It:
+
+1. Creates the `clawshell` system user.
+2. Creates and secures `/etc/clawshell` (mode 700) and `/var/log/clawshell`.
+3. Walks you through provider selection, API key entry, and virtual key generation.
+4. Writes the ClawShell config to `/etc/clawshell/clawshell.toml`.
+5. Updates your OpenClaw configuration to route through ClawShell.
+6. Starts the ClawShell daemon.
+
+```bash
+sudo clawshell onboard
+```
+
+### More Commands (advanced usage)
+
+```bash
+# Start (daemonizes by default)
+clawshell start
+
+# Start in the foreground
+clawshell start --foreground
+
+# Start with a custom config file
+clawshell start -c /path/to/clawshell.toml
+
+# Check status
+clawshell status
+
+# View logs
+clawshell logs
+clawshell logs --level error
+clawshell logs --follow
+
+# Restart / Stop
+clawshell restart
+clawshell stop
+```
+
+By default ClawShell listens on `127.0.0.1:18790`.
+
+### Customized Configuration
+
+ClawShell reads its config from `/etc/clawshell/clawshell.toml`. You can view or edit it with:
+
+```bash
+clawshell config          # print current config
+clawshell config --edit   # open in $EDITOR
+```
+
+A minimal config looks like this:
+
+```toml
+log_level = "info"
+
+[server]
+host = "127.0.0.1"
+port = 18790
+
+[upstream]
+base_url = "https://api.openai.com"
+anthropic_base_url = "https://api.anthropic.com"
+
+# Virtual-to-real API key mappings
+[[keys]]
+virtual_key = "vk-alice-001"
+real_key = "sk-your-real-openai-key-here"
+provider = "openai"
+
+[[keys]]
+virtual_key = "vk-claude-001"
+real_key = "sk-ant-your-real-anthropic-key-here"
+provider = "anthropic"
+
+# Data Loss Prevention (DLP)
+# action = "block"  -> reject the request with 400
+# action = "redact" -> replace matches with [REDACTED:<name>] and forward
+[dlp]
+scan_responses = false
+patterns = [
+    { name = "ssn",       regex = '\b\d{3}-\d{2}-\d{4}\b',          action = "redact" },
+    { name = "visa_card", regex = '\b4[0-9]{12}(?:[0-9]{3})?\b',    action = "redact" },
+    { name = "amex_card", regex = '\b3[47][0-9]{13}\b',              action = "redact" },
+]
+```
+
+See [`clawshell.example.toml`](clawshell.example.toml) for a full example.
+
+### Uninstall
+
+```bash
+sudo clawshell uninstall
+```
+
+## License
+
+This project is licensed under the [Apache License 2.0](LICENSE).
