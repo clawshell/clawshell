@@ -16,12 +16,12 @@ pub struct DlpScanner {
     scan_responses: bool,
 }
 
-/// Result of scanning text for sensitive data.
+/// Result of scanning bytes for sensitive data.
 #[derive(Debug, Clone)]
 pub struct ScanResult {
     /// Pattern names that matched with action=block.
     pub blocked: Vec<String>,
-    /// The text with action=redact patterns replaced.
+    /// The bytes with action=redact patterns replaced.
     pub redacted: Vec<u8>,
     /// Whether any redaction was applied.
     pub was_redacted: bool,
@@ -61,7 +61,7 @@ impl DlpScanner {
     /// Returns a list of pattern names that matched with action=block (without including the actual sensitive data).
     #[cfg(test)]
     pub fn scan(&self, body: &[u8]) -> Vec<String> {
-        trace!(text_len = body.len(), "Scanning text for block patterns");
+        trace!(body_len = body.len(), "Scanning body for block patterns");
         let matches: Vec<String> = self
             .patterns
             .iter()
@@ -79,8 +79,8 @@ impl DlpScanner {
     /// Returns blocked pattern names and redacted body.
     pub fn scan_and_redact(&self, body: &[u8]) -> ScanResult {
         trace!(
-            text_len = body.len(),
-            "Scanning text for block+redact patterns"
+            body_len = body.len(),
+            "Scanning body for block+redact patterns"
         );
         let blocked: Vec<String> = self
             .patterns
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn test_redact_all_clean_text() {
+    fn test_redact_all_clean_bytes() {
         let scanner = DlpScanner::new(&mixed_patterns()).unwrap();
         let (redacted, names) = scanner.redact_all(b"Hello, how are you?");
         assert!(names.is_empty());
