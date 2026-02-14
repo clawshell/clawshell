@@ -14,7 +14,7 @@ pub mod tui;
 use crate::config::{Config, Provider};
 use crate::dlp::DlpScanner;
 use crate::keys::{KeyManager, ResolvedKey};
-use crate::proxy::ProxyClient;
+use crate::proxy::{ClientConfig, ProxyClient};
 
 use axum::Router;
 use axum::body::Body;
@@ -38,6 +38,8 @@ pub struct AppState {
 
 impl AppState {
     pub fn from_config(config: &Config) -> Self {
+        use std::time::Duration;
+
         let mut upstream_urls = BTreeMap::new();
         upstream_urls.insert(Provider::Openai, config.upstream_url(Provider::Openai));
         upstream_urls.insert(
@@ -59,15 +61,24 @@ impl AppState {
             })
             .collect();
 
+        // Build client configuration from upstream settings
+        let client_config = ClientConfig {
+            connect_timeout: Duration::from_secs(config.upstream.connect_timeout_secs),
+            request_timeout: Duration::from_secs(config.upstream.request_timeout_secs),
+            pool_idle_timeout: Duration::from_secs(config.upstream.pool_idle_timeout_secs),
+            pool_max_idle_per_host: config.upstream.pool_max_idle_per_host,
+        };
+
         Self {
             key_manager: Arc::new(KeyManager::new(key_mappings)),
             dlp_scanner: Arc::new(
                 DlpScanner::new(&config.dlp.patterns, config.dlp.scan_responses)
                     .expect("Failed to compile DLP patterns"),
             ),
-            proxy_client: Arc::new(ProxyClient::with_upstream_urls(
+            proxy_client: Arc::new(ProxyClient::with_config(
                 upstream_urls,
                 config.upstream.anthropic_version.clone(),
+                client_config,
             )),
         }
     }

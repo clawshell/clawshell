@@ -9,7 +9,36 @@ use futures_util::TryStreamExt;
 use reqwest::Client;
 use std::collections::BTreeMap;
 use std::io::Error as IoError;
+use std::time::Duration;
 use tracing::{debug, trace};
+
+/// Configuration for HTTP client timeouts and connection pooling.
+///
+/// These settings control how the proxy client behaves when connecting to
+/// upstream LLM APIs. The defaults are tuned for typical LLM workloads where
+/// responses may take several minutes for long completions.
+#[derive(Debug, Clone)]
+pub struct ClientConfig {
+    /// Maximum time to wait for TCP connection establishment.
+    pub connect_timeout: Duration,
+    /// Maximum time for the entire request/response cycle.
+    pub request_timeout: Duration,
+    /// How long idle connections stay in the pool before being closed.
+    pub pool_idle_timeout: Duration,
+    /// Maximum idle connections to keep per host.
+    pub pool_max_idle_per_host: usize,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(30),
+            request_timeout: Duration::from_secs(300), // 5 minutes for LLM completions
+            pool_idle_timeout: Duration::from_secs(90),
+            pool_max_idle_per_host: 32,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct ProxyClient {
@@ -19,14 +48,45 @@ pub struct ProxyClient {
 }
 
 impl ProxyClient {
+    /// Creates a new ProxyClient with default timeout configuration.
     pub fn with_upstream_urls(
         upstream_urls: BTreeMap<Provider, String>,
         anthropic_version: String,
     ) -> Self {
+        Self::with_config(upstream_urls, anthropic_version, ClientConfig::default())
+    }
+
+    /// Creates a new ProxyClient with custom timeout and pool configuration.
+    ///
+    /// # Arguments
+    /// * `upstream_urls` - Map of provider to base URL
+    /// * `anthropic_version` - Anthropic API version header value
+    /// * `config` - Timeout and connection pool settings
+    ///
+    /// # Panics
+    /// Panics if the HTTP client fails to build (e.g., TLS initialization failure).
+    pub fn with_config(
+        upstream_urls: BTreeMap<Provider, String>,
+        anthropic_version: String,
+        config: ClientConfig,
+    ) -> Self {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(config.connect_timeout)
+            .timeout(config.request_timeout)
+            .pool_idle_timeout(config.pool_idle_timeout)
+            .pool_max_idle_per_host(config.pool_max_idle_per_host)
             .build()
             .expect("Failed to build reqwest client");
+
+        debug!(
+            connect_timeout_ms = config.connect_timeout.as_millis(),
+            request_timeout_ms = config.request_timeout.as_millis(),
+            pool_idle_timeout_ms = config.pool_idle_timeout.as_millis(),
+            pool_max_idle_per_host = config.pool_max_idle_per_host,
+            "ProxyClient initialized with timeout configuration"
+        );
+
         Self {
             client,
             upstream_urls,
@@ -307,5 +367,39 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["error"].as_str().unwrap().contains("TRACE"));
+    }
+
+    #[test]
+    fn test_client_config_default() {
+        let config = ClientConfig::default();
+        assert_eq!(config.connect_timeout, Duration::from_secs(30));
+        assert_eq!(config.request_timeout, Duration::from_secs(300));
+        assert_eq!(config.pool_idle_timeout, Duration::from_secs(90));
+        assert_eq!(config.pool_max_idle_per_host, 32);
+    }
+
+    #[test]
+    fn test_proxy_client_with_custom_config() {
+        let mut urls = BTreeMap::new();
+        urls.insert(Provider::Openai, "https://api.openai.com".to_string());
+
+        let custom_config = ClientConfig {
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(60),
+            pool_idle_timeout: Duration::from_secs(30),
+            pool_max_idle_per_host: 16,
+        };
+
+        // This should not panic - verifies the client builds successfully
+        let _client = ProxyClient::with_config(urls, "2023-06-01".to_string(), custom_config);
+    }
+
+    #[test]
+    fn test_proxy_client_with_default_config() {
+        let mut urls = BTreeMap::new();
+        urls.insert(Provider::Openai, "https://api.openai.com".to_string());
+
+        // with_upstream_urls should use default config internally
+        let _client = ProxyClient::with_upstream_urls(urls, "2023-06-01".to_string());
     }
 }
