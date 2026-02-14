@@ -57,7 +57,7 @@ impl DlpScanner {
         })
     }
 
-    /// Scans the input text for sensitive data.
+    /// Scans the input body for sensitive data.
     /// Returns a list of pattern names that matched with action=block (without including the actual sensitive data).
     #[cfg(test)]
     pub fn scan(&self, body: &[u8]) -> Vec<String> {
@@ -75,8 +75,8 @@ impl DlpScanner {
         matches
     }
 
-    /// Scans text and applies both block detection and redaction.
-    /// Returns blocked pattern names and redacted text.
+    /// Scans body and applies both block detection and redaction.
+    /// Returns blocked pattern names and redacted body.
     pub fn scan_and_redact(&self, body: &[u8]) -> ScanResult {
         trace!(
             text_len = body.len(),
@@ -119,10 +119,10 @@ impl DlpScanner {
         }
     }
 
-    /// Redacts all sensitive data (both block and redact patterns) from text.
+    /// Redacts all sensitive data (both block and redact patterns) from body.
     /// Used for response scanning where we want to redact rather than block.
     pub fn redact_all(&self, body: &[u8]) -> (Vec<u8>, Vec<String>) {
-        trace!(text_len = body.len(), "Redacting all patterns from text");
+        trace!(body_len = body.len(), "Redacting all patterns from body");
         let mut redacted = body.to_vec();
         let mut redacted_names = Vec::new();
 
