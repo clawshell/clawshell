@@ -1,0 +1,8 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    commit-message:
+      prefix: "chore(Cargo.toml)"
+    schedule:
+      interval: "weekly"
