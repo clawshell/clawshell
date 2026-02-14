@@ -1,4 +1,4 @@
-use regex::Regex;
+use regex::bytes::Regex;
 use tracing::{debug, trace};
 
 use crate::config::{DlpAction, DlpPattern};
@@ -22,7 +22,7 @@ pub struct ScanResult {
     /// Pattern names that matched with action=block.
     pub blocked: Vec<String>,
     /// The text with action=redact patterns replaced.
-    pub redacted_text: String,
+    pub redacted: Vec<u8>,
     /// Whether any redaction was applied.
     pub was_redacted: bool,
 }
@@ -59,12 +59,13 @@ impl DlpScanner {
 
     /// Scans the input text for sensitive data.
     /// Returns a list of pattern names that matched with action=block (without including the actual sensitive data).
-    pub fn scan(&self, text: &str) -> Vec<String> {
-        trace!(text_len = text.len(), "Scanning text for block patterns");
+    #[cfg(test)]
+    pub fn scan(&self, body: &[u8]) -> Vec<String> {
+        trace!(text_len = body.len(), "Scanning text for block patterns");
         let matches: Vec<String> = self
             .patterns
             .iter()
-            .filter(|p| p.action == DlpAction::Block && p.regex.is_match(text))
+            .filter(|p| p.action == DlpAction::Block && p.regex.is_match(body))
             .map(|p| {
                 debug!(pattern = %p.name, "Block pattern matched");
                 p.name.clone()
@@ -76,22 +77,22 @@ impl DlpScanner {
 
     /// Scans text and applies both block detection and redaction.
     /// Returns blocked pattern names and redacted text.
-    pub fn scan_and_redact(&self, text: &str) -> ScanResult {
+    pub fn scan_and_redact(&self, body: &[u8]) -> ScanResult {
         trace!(
-            text_len = text.len(),
+            text_len = body.len(),
             "Scanning text for block+redact patterns"
         );
         let blocked: Vec<String> = self
             .patterns
             .iter()
-            .filter(|p| p.action == DlpAction::Block && p.regex.is_match(text))
+            .filter(|p| p.action == DlpAction::Block && p.regex.is_match(body))
             .map(|p| {
                 debug!(pattern = %p.name, "Block pattern matched in request");
                 p.name.clone()
             })
             .collect();
 
-        let mut redacted = text.to_string();
+        let mut redacted = body.to_vec();
         let mut was_redacted = false;
 
         for p in &self.patterns {
@@ -100,8 +101,8 @@ impl DlpScanner {
                 let replacement = format!("[REDACTED:{}]", p.name);
                 redacted = p
                     .regex
-                    .replace_all(&redacted, replacement.as_str())
-                    .to_string();
+                    .replace_all(&redacted, replacement.as_bytes())
+                    .to_vec();
                 was_redacted = true;
             }
         }
@@ -113,16 +114,16 @@ impl DlpScanner {
 
         ScanResult {
             blocked,
-            redacted_text: redacted,
+            redacted,
             was_redacted,
         }
     }
 
     /// Redacts all sensitive data (both block and redact patterns) from text.
     /// Used for response scanning where we want to redact rather than block.
-    pub fn redact_all(&self, text: &str) -> (String, Vec<String>) {
-        trace!(text_len = text.len(), "Redacting all patterns from text");
-        let mut redacted = text.to_string();
+    pub fn redact_all(&self, body: &[u8]) -> (Vec<u8>, Vec<String>) {
+        trace!(text_len = body.len(), "Redacting all patterns from text");
+        let mut redacted = body.to_vec();
         let mut redacted_names = Vec::new();
 
         for p in &self.patterns {
@@ -131,8 +132,8 @@ impl DlpScanner {
                 let replacement = format!("[REDACTED:{}]", p.name);
                 redacted = p
                     .regex
-                    .replace_all(&redacted, replacement.as_str())
-                    .to_string();
+                    .replace_all(&redacted, replacement.as_bytes())
+                    .to_vec();
                 redacted_names.push(p.name.clone());
             }
         }
@@ -192,38 +193,44 @@ mod tests {
         ]
     }
 
+    fn subslice(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+
     #[test]
     fn test_detect_credit_card() {
         let scanner = DlpScanner::new(&default_patterns()).unwrap();
-        let matches = scanner.scan("My card is 4111 1111 1111 1111 please charge it");
+        let matches = scanner.scan(b"My card is 4111 1111 1111 1111 please charge it");
         assert!(matches.contains(&"credit_card".to_string()));
     }
 
     #[test]
     fn test_detect_ssn() {
         let scanner = DlpScanner::new(&default_patterns()).unwrap();
-        let matches = scanner.scan("My SSN is 123-45-6789");
+        let matches = scanner.scan(b"My SSN is 123-45-6789");
         assert!(matches.contains(&"ssn".to_string()));
     }
 
     #[test]
     fn test_detect_email() {
         let scanner = DlpScanner::new(&default_patterns()).unwrap();
-        let matches = scanner.scan("Contact me at user@example.com");
+        let matches = scanner.scan(b"Contact me at user@example.com");
         assert!(matches.contains(&"email".to_string()));
     }
 
     #[test]
     fn test_no_sensitive_data() {
         let scanner = DlpScanner::new(&default_patterns()).unwrap();
-        let matches = scanner.scan("Tell me about the weather today");
+        let matches = scanner.scan(b"Tell me about the weather today");
         assert!(matches.is_empty());
     }
 
     #[test]
     fn test_multiple_detections() {
         let scanner = DlpScanner::new(&default_patterns()).unwrap();
-        let matches = scanner.scan("Card: 4111111111111111, SSN: 123-45-6789, email: a@b.com");
+        let matches = scanner.scan(b"Card: 4111111111111111, SSN: 123-45-6789, email: a@b.com");
         assert!(matches.contains(&"credit_card".to_string()));
         assert!(matches.contains(&"ssn".to_string()));
         assert!(matches.contains(&"email".to_string()));
@@ -232,7 +239,7 @@ mod tests {
     #[test]
     fn test_empty_patterns() {
         let scanner = DlpScanner::new(&[]).unwrap();
-        let matches = scanner.scan("4111111111111111");
+        let matches = scanner.scan(b"4111111111111111");
         assert!(matches.is_empty());
     }
 
@@ -241,44 +248,44 @@ mod tests {
     #[test]
     fn test_redact_email() {
         let scanner = DlpScanner::new(&mixed_patterns()).unwrap();
-        let result = scanner.scan_and_redact("Contact me at user@example.com");
+        let result = scanner.scan_and_redact(b"Contact me at user@example.com");
         assert!(result.blocked.is_empty());
         assert!(result.was_redacted);
-        assert!(result.redacted_text.contains("[REDACTED:email]"));
-        assert!(!result.redacted_text.contains("user@example.com"));
+        assert!(subslice(&result.redacted, b"[REDACTED:email]"));
+        assert!(!subslice(&result.redacted, b"user@example.com"));
     }
 
     #[test]
     fn test_redact_phone() {
         let scanner = DlpScanner::new(&mixed_patterns()).unwrap();
-        let result = scanner.scan_and_redact("Call me at 555-123-4567");
+        let result = scanner.scan_and_redact(b"Call me at 555-123-4567");
         assert!(result.blocked.is_empty());
         assert!(result.was_redacted);
-        assert!(result.redacted_text.contains("[REDACTED:phone_number]"));
-        assert!(!result.redacted_text.contains("555-123-4567"));
+        assert!(subslice(&result.redacted, b"[REDACTED:phone_number]"));
+        assert!(!subslice(&result.redacted, b"555-123-4567"));
     }
 
     #[test]
     fn test_block_ssn_and_redact_email() {
         let scanner = DlpScanner::new(&mixed_patterns()).unwrap();
-        let result = scanner.scan_and_redact("SSN: 123-45-6789, email: user@example.com");
+        let result = scanner.scan_and_redact(b"SSN: 123-45-6789, email: user@example.com");
         assert!(result.blocked.contains(&"ssn".to_string()));
         assert!(result.was_redacted);
-        assert!(result.redacted_text.contains("[REDACTED:email]"));
+        assert!(subslice(&result.redacted, b"[REDACTED:email]"));
     }
 
     #[test]
     fn test_scan_only_returns_block_patterns() {
         let scanner = DlpScanner::new(&mixed_patterns()).unwrap();
         // Email is action=redact, so scan() should NOT return it
-        let matches = scanner.scan("Contact me at user@example.com");
+        let matches = scanner.scan(b"Contact me at user@example.com");
         assert!(!matches.contains(&"email".to_string()));
     }
 
     #[test]
     fn test_scan_returns_block_patterns() {
         let scanner = DlpScanner::new(&mixed_patterns()).unwrap();
-        let matches = scanner.scan("My SSN is 123-45-6789");
+        let matches = scanner.scan(b"My SSN is 123-45-6789");
         assert!(matches.contains(&"ssn".to_string()));
     }
 
@@ -286,33 +293,33 @@ mod tests {
     fn test_redact_all_replaces_everything() {
         let scanner = DlpScanner::new(&mixed_patterns()).unwrap();
         let (redacted, names) =
-            scanner.redact_all("SSN: 123-45-6789, email: user@example.com, phone: 555-123-4567");
+            scanner.redact_all(b"SSN: 123-45-6789, email: user@example.com, phone: 555-123-4567");
         assert!(names.contains(&"ssn".to_string()));
         assert!(names.contains(&"email".to_string()));
         assert!(names.contains(&"phone_number".to_string()));
-        assert!(redacted.contains("[REDACTED:ssn]"));
-        assert!(redacted.contains("[REDACTED:email]"));
-        assert!(redacted.contains("[REDACTED:phone_number]"));
-        assert!(!redacted.contains("123-45-6789"));
-        assert!(!redacted.contains("user@example.com"));
-        assert!(!redacted.contains("555-123-4567"));
+        assert!(subslice(&redacted, b"[REDACTED:ssn]"));
+        assert!(subslice(&redacted, b"[REDACTED:email]"));
+        assert!(subslice(&redacted, b"[REDACTED:phone_number]"));
+        assert!(!subslice(&redacted, b"123-45-6789"));
+        assert!(!subslice(&redacted, b"user@example.com"));
+        assert!(!subslice(&redacted, b"555-123-4567"));
     }
 
     #[test]
     fn test_redact_all_clean_text() {
         let scanner = DlpScanner::new(&mixed_patterns()).unwrap();
-        let (redacted, names) = scanner.redact_all("Hello, how are you?");
+        let (redacted, names) = scanner.redact_all(b"Hello, how are you?");
         assert!(names.is_empty());
-        assert_eq!(redacted, "Hello, how are you?");
+        assert_eq!(redacted, b"Hello, how are you?");
     }
 
     #[test]
     fn test_no_redaction_when_clean() {
         let scanner = DlpScanner::new(&mixed_patterns()).unwrap();
-        let result = scanner.scan_and_redact("Hello world");
+        let result = scanner.scan_and_redact(b"Hello world");
         assert!(result.blocked.is_empty());
         assert!(!result.was_redacted);
-        assert_eq!(result.redacted_text, "Hello world");
+        assert_eq!(result.redacted, b"Hello world");
     }
 
     #[test]
@@ -331,12 +338,9 @@ mod tests {
             action: DlpAction::Redact,
         }];
         let scanner = DlpScanner::new(&patterns).unwrap();
-        let result = scanner.scan_and_redact("a@b.com and c@d.com");
+        let result = scanner.scan_and_redact(b"a@b.com and c@d.com");
         assert!(result.was_redacted);
-        assert_eq!(
-            result.redacted_text,
-            "[REDACTED:email] and [REDACTED:email]"
-        );
+        assert_eq!(result.redacted, b"[REDACTED:email] and [REDACTED:email]");
     }
 
     #[test]
@@ -349,18 +353,45 @@ mod tests {
         let scanner = DlpScanner::new(&patterns).unwrap();
 
         // Standard US format
-        let (redacted, names) = scanner.redact_all("Call 555-123-4567");
+        let (redacted, names) = scanner.redact_all(b"Call 555-123-4567");
         assert!(names.contains(&"phone_number".to_string()));
-        assert!(!redacted.contains("555-123-4567"));
+        assert!(!subslice(&redacted, b"555-123-4567"));
 
         // With parentheses
-        let (redacted, names) = scanner.redact_all("Call (555) 123-4567");
+        let (redacted, names) = scanner.redact_all(b"Call (555) 123-4567");
         assert!(names.contains(&"phone_number".to_string()));
-        assert!(!redacted.contains("(555) 123-4567"));
+        assert!(!subslice(&redacted, b"(555) 123-4567"));
 
         // With +1 prefix
-        let (redacted, names) = scanner.redact_all("Call +1-555-123-4567");
+        let (redacted, names) = scanner.redact_all(b"Call +1-555-123-4567");
         assert!(names.contains(&"phone_number".to_string()));
-        assert!(!redacted.contains("+1-555-123-4567"));
+        assert!(!subslice(&redacted, b"+1-555-123-4567"));
+    }
+
+    #[test]
+    fn test_non_utf8_input() {
+        let patterns = vec![DlpPattern {
+            name: "phone_number".to_string(),
+            regex: r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}\b".to_string(),
+            action: DlpAction::Redact,
+        }];
+        let scanner = DlpScanner::new(&patterns).unwrap();
+        let input = b"Call \xFF\xFE\xFD 555-123-4567";
+        std::str::from_utf8(input.as_slice()).unwrap_err(); // Confirm it's not valid UTF-8
+
+        let result = scanner.scan_and_redact(input);
+        assert!(result.was_redacted);
+        assert!(result.blocked.is_empty());
+        assert_eq!(
+            &result.redacted,
+            b"Call \xFF\xFE\xFD [REDACTED:phone_number]"
+        );
+
+        let (redacted, names) = scanner.redact_all(input);
+        assert!(names.contains(&"phone_number".to_string()));
+        assert!(subslice(
+            &redacted,
+            b"Call \xFF\xFE\xFD [REDACTED:phone_number]"
+        ));
     }
 }

@@ -146,35 +146,31 @@ async fn handle_request(
 
     // 3. DLP scan on request body (block patterns reject, redact patterns mask)
     let body_bytes = if !body_bytes.is_empty() {
-        if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
-            let result = state.dlp_scanner.scan_and_redact(body_str);
-            if !result.blocked.is_empty() {
-                warn!(
-                    method = %method,
-                    path = %path,
-                    virtual_key = %virtual_key,
-                    detections = ?result.blocked,
-                    "Sensitive data detected in request"
-                );
-                return Err(error_response(
-                    StatusCode::BAD_REQUEST,
-                    &format!(
-                        "Request blocked: sensitive data detected ({})",
-                        result.blocked.join(", ")
-                    ),
-                ));
-            }
-            if result.was_redacted {
-                info!(
-                    method = %method,
-                    path = %path,
-                    virtual_key = %virtual_key,
-                    "PII redacted from request body before forwarding"
-                );
-                Bytes::from(result.redacted_text)
-            } else {
-                body_bytes
-            }
+        let result = state.dlp_scanner.scan_and_redact(&body_bytes);
+        if !result.blocked.is_empty() {
+            warn!(
+                method = %method,
+                path = %path,
+                virtual_key = %virtual_key,
+                detections = ?result.blocked,
+                "Sensitive data detected in request"
+            );
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "Request blocked: sensitive data detected ({})",
+                    result.blocked.join(", ")
+                ),
+            ));
+        }
+        if result.was_redacted {
+            info!(
+                method = %method,
+                path = %path,
+                virtual_key = %virtual_key,
+                "PII redacted from request body before forwarding"
+            );
+            Bytes::from(result.redacted)
         } else {
             body_bytes
         }
@@ -224,7 +220,7 @@ async fn handle_request(
         if !is_streaming {
             trace!("Non-streaming response, scanning body for PII");
             let (parts, body) = response.into_parts();
-            let resp_bytes = body
+            let body = body
                 .collect()
                 .await
                 .map_err(|e| {
@@ -236,26 +232,22 @@ async fn handle_request(
                 })?
                 .to_bytes();
 
-            if let Ok(resp_str) = std::str::from_utf8(&resp_bytes) {
-                let (redacted, redacted_names) = state.dlp_scanner.redact_all(resp_str);
-                if !redacted_names.is_empty() {
-                    warn!(
-                        method = %method,
-                        path = %path,
-                        virtual_key = %virtual_key,
-                        redacted_patterns = ?redacted_names,
-                        "PII redacted from upstream response"
-                    );
-                    let redacted_bytes = Bytes::from(redacted);
-                    let mut parts = parts;
-                    // Remove stale content-length; axum/hyper will recalculate it
-                    parts.headers.remove("content-length");
-                    Response::from_parts(parts, Body::from(redacted_bytes))
-                } else {
-                    Response::from_parts(parts, Body::from(resp_bytes))
-                }
+            let (redacted, redacted_names) = state.dlp_scanner.redact_all(&body);
+            if !redacted_names.is_empty() {
+                warn!(
+                    method = %method,
+                    path = %path,
+                    virtual_key = %virtual_key,
+                    redacted_patterns = ?redacted_names,
+                    "PII redacted from upstream response"
+                );
+                let redacted_bytes = Bytes::from(redacted);
+                let mut parts = parts;
+                // Remove stale content-length; axum/hyper will recalculate it
+                parts.headers.remove("content-length");
+                Response::from_parts(parts, Body::from(redacted_bytes))
             } else {
-                Response::from_parts(parts, Body::from(resp_bytes))
+                Response::from_parts(parts, Body::from(body))
             }
         } else {
             warn!(
