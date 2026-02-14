@@ -1,0 +1,5 @@
+[server]
+[upstream]
+
+[dlp]
+scan_responses = "yes"

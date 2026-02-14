@@ -1,0 +1,9 @@
+---
+source: tests/config_fixtures.rs
+expression: err.to_string()
+---
+TOML parse error at line 5, column 18
+  |
+5 | scan_responses = "yes"
+  |                  ^^^^^
+invalid type: string "yes", expected a boolean

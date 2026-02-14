@@ -1,0 +1,7 @@
+[server]
+
+[upstream]
+
+[[keys]]
+virtual_key = ""
+real_key = ""

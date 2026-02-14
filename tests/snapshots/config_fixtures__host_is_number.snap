@@ -1,0 +1,9 @@
+---
+source: tests/config_fixtures.rs
+expression: err.to_string()
+---
+TOML parse error at line 2, column 8
+  |
+2 | host = 12345
+  |        ^^^^^
+invalid type: integer `12345`, expected a string

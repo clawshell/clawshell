@@ -1,9 +1,9 @@
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     #[default]
@@ -20,7 +20,7 @@ impl Provider {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     pub server: ServerConfig,
     pub upstream: UpstreamConfig,
@@ -36,7 +36,7 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ServerConfig {
     #[serde(default = "default_host")]
     pub host: String,
@@ -52,7 +52,7 @@ fn default_port() -> u16 {
     18790
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct UpstreamConfig {
     #[serde(default = "default_base_url")]
     pub base_url: String,
@@ -70,7 +70,7 @@ fn default_base_url() -> String {
     "https://api.openai.com".to_string()
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct KeyMapping {
     pub virtual_key: String,
     pub real_key: String,
@@ -78,7 +78,7 @@ pub struct KeyMapping {
     pub provider: Provider,
 }
 
-#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DlpAction {
     #[default]
@@ -86,7 +86,7 @@ pub enum DlpAction {
     Redact,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DlpConfig {
     #[serde(default)]
     pub patterns: Vec<DlpPattern>,
@@ -107,7 +107,7 @@ impl Default for DlpConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DlpPattern {
     pub name: String,
     pub regex: String,

@@ -32,3 +32,9 @@ console = "0.16.2"
 tokio = { version = "1.49", features = ["full", "test-util"] }
 tower = { version = "0.5.3", features = ["util"] }
 wiremock = "0.6"
+datatest-stable = "0.3"
+insta = { version = "1", features = ["yaml"] }
+
+[[test]]
+name = "config_fixtures"
+harness = false

@@ -1,0 +1,4 @@
+[server]
+port = "not_a_number"
+
+[upstream]

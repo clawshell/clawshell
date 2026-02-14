@@ -1,0 +1,9 @@
+---
+source: tests/config_fixtures.rs
+expression: err.to_string()
+---
+TOML parse error at line 4, column 1
+  |
+4 | [[keys]]
+  | ^^^^^^^^
+missing field `real_key`

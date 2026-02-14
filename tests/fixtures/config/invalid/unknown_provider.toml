@@ -1,0 +1,7 @@
+[server]
+[upstream]
+
+[[keys]]
+virtual_key = "vk-1"
+real_key = "sk-1"
+provider = "azure"

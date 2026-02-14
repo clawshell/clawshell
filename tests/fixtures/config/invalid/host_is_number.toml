@@ -1,0 +1,4 @@
+[server]
+host = 12345
+
+[upstream]

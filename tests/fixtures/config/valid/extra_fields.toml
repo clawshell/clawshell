@@ -1,0 +1,6 @@
+[server]
+host = "0.0.0.0"
+unknown_field = true
+
+[upstream]
+also_unknown = "hi"

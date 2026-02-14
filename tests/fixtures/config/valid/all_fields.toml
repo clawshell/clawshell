@@ -1,0 +1,26 @@
+log_level = "debug"
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[upstream]
+base_url = "https://custom.api.com"
+anthropic_base_url = "https://custom.anthropic.com"
+anthropic_version = "2024-01-01"
+
+[[keys]]
+virtual_key = "vk-1"
+real_key = "sk-real-1"
+
+[[keys]]
+virtual_key = "vk-2"
+real_key = "sk-real-2"
+provider = "anthropic"
+
+[dlp]
+scan_responses = true
+patterns = [
+    { name = "ssn", regex = '\b\d{3}-\d{2}-\d{4}\b', action = "block" },
+    { name = "email", regex = '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', action = "redact" },
+]

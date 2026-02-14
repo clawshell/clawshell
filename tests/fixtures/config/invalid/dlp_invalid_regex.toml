@@ -1,0 +1,7 @@
+[server]
+[upstream]
+
+[dlp]
+patterns = [
+    { name = "bad", regex = '[invalid' },
+]

@@ -1,0 +1,27 @@
+---
+source: tests/config_fixtures.rs
+expression: snapshot
+---
+server:
+  host: 127.0.0.1
+  port: 18790
+upstream:
+  base_url: "https://api.openai.com"
+  anthropic_base_url: ~
+  anthropic_version: 2023-06-01
+keys:
+  - virtual_key: ""
+    real_key: ""
+    provider: openai
+dlp:
+  patterns: []
+  scan_responses: true
+log_level: info
+derived:
+  listen_addr: "127.0.0.1:18790"
+  openai_upstream_url: "https://api.openai.com"
+  anthropic_upstream_url: "https://api.anthropic.com"
+  key_map:
+    "":
+      - ""
+      - openai

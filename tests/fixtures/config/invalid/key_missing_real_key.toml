@@ -1,0 +1,5 @@
+[server]
+[upstream]
+
+[[keys]]
+virtual_key = "vk-1"

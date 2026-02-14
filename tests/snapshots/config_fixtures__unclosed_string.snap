@@ -1,0 +1,9 @@
+---
+source: tests/config_fixtures.rs
+expression: err.to_string()
+---
+TOML parse error at line 2, column 16
+  |
+2 | host = "0.0.0.0
+  |                ^
+invalid basic string, expected `"`

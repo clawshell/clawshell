@@ -1,0 +1,8 @@
+---
+source: tests/config_fixtures.rs
+expression: err.to_string()
+---
+Invalid DLP regex for 'bad': regex parse error:
+    [invalid
+    ^
+error: unclosed character class

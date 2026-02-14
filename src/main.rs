@@ -516,14 +516,13 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     {
         warn!(path = %log_dir_path.display(), error = %e, "Failed to chown log directory");
     }
-    if let Some(pid_parent) = pid_path.parent() {
-        if let Err(e) = std::process::Command::new("chown")
+    if let Some(pid_parent) = pid_path.parent()
+        && let Err(e) = std::process::Command::new("chown")
             .args([chown_spec, &pid_parent.to_string_lossy()])
             .status()
         {
             warn!(path = %pid_parent.display(), error = %e, "Failed to chown PID directory");
         }
-    }
     tui::print_step_done(3, TOTAL_STEPS, "Permissions set");
 
     // Step 4: Ask the user for configuration details (TUI prompts)

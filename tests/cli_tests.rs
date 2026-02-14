@@ -18,10 +18,10 @@ fn log_file_path() -> std::path::PathBuf {
 /// Returns true if we have write access.
 fn ensure_log_dir() -> bool {
     let path = log_file_path();
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return false;
-        }
+    if let Some(parent) = path.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return false;
     }
     // Check write access by trying to create/touch the file
     std::fs::OpenOptions::new()

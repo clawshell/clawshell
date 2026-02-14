@@ -1,0 +1,5 @@
+[server]
+[upstream]
+
+[[keys]]
+real_key = "sk-1"

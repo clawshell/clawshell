@@ -222,11 +222,11 @@ mod tests {
     #[test]
     fn test_write_and_read_pid_file() {
         // Ensure the PID directory exists (may need permissions)
-        if let Some(parent) = pid_file_path().parent() {
-            if fs::create_dir_all(parent).is_err() {
-                eprintln!("Skipping test_write_and_read_pid_file: cannot create PID dir");
-                return;
-            }
+        if let Some(parent) = pid_file_path().parent()
+            && fs::create_dir_all(parent).is_err()
+        {
+            eprintln!("Skipping test_write_and_read_pid_file: cannot create PID dir");
+            return;
         }
         let test_pid = process::id();
         write_pid_file(test_pid).unwrap();

@@ -1,0 +1,9 @@
+---
+source: tests/config_fixtures.rs
+expression: err.to_string()
+---
+TOML parse error at line 2, column 8
+  |
+2 | port = "not_a_number"
+  |        ^^^^^^^^^^^^^^
+invalid type: string "not_a_number", expected u16

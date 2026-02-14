@@ -1,0 +1,4 @@
+[server]
+port = 65535
+
+[upstream]

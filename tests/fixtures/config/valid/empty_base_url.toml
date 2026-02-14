@@ -1,0 +1,4 @@
+[server]
+
+[upstream]
+base_url = ""
