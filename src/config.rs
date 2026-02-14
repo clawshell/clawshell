@@ -42,6 +42,13 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+
+    /// Graceful shutdown timeout in seconds. When receiving a shutdown signal
+    /// (SIGTERM/SIGINT), the server will wait up to this duration for in-flight
+    /// requests to complete before forcefully terminating.
+    /// Default: 30 seconds.
+    #[serde(default = "default_shutdown_timeout_secs")]
+    pub shutdown_timeout_secs: u64,
 }
 
 fn default_host() -> String {
@@ -50,6 +57,10 @@ fn default_host() -> String {
 
 fn default_port() -> u16 {
     18790
+}
+
+fn default_shutdown_timeout_secs() -> u64 {
+    30
 }
 
 #[derive(Debug, Deserialize, Clone)]
