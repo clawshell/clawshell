@@ -121,6 +121,18 @@ pub fn drop_privileges() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn get_process_uptime(pid: u32) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        get_process_uptime_macos(pid)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        get_process_uptime_linux(pid)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_process_uptime_linux(pid: u32) -> Option<String> {
     let stat_path = format!("/proc/{}/stat", pid);
     let stat = fs::read_to_string(&stat_path).ok()?;
     let boot_time = get_boot_time()?;
@@ -134,6 +146,67 @@ pub fn get_process_uptime(pid: u32) -> Option<String> {
     Some(format_duration(uptime_secs))
 }
 
+#[cfg(target_os = "macos")]
+fn get_process_uptime_macos(pid: u32) -> Option<String> {
+    // Use `ps -o etime= -p <pid>` to get elapsed time on macOS
+    // Output format: [[DD-]HH:]MM:SS or just SS
+    let output = std::process::Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let etime = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if etime.is_empty() {
+        return None;
+    }
+
+    // Parse etime format: [[DD-]HH:]MM:SS
+    let uptime_secs = parse_etime(&etime)?;
+    Some(format_duration(uptime_secs))
+}
+
+#[cfg(target_os = "macos")]
+fn parse_etime(etime: &str) -> Option<u64> {
+    let mut total_secs: u64 = 0;
+
+    // Check for days: "DD-HH:MM:SS"
+    let (days, rest) = if let Some(pos) = etime.find('-') {
+        let d: u64 = etime[..pos].parse().ok()?;
+        (d, &etime[pos + 1..])
+    } else {
+        (0, etime)
+    };
+    total_secs += days * 86400;
+
+    // Parse remaining as HH:MM:SS or MM:SS or SS
+    let parts: Vec<&str> = rest.split(':').collect();
+    match parts.len() {
+        1 => {
+            // Just seconds
+            total_secs += parts[0].parse::<u64>().ok()?;
+        }
+        2 => {
+            // MM:SS
+            total_secs += parts[0].parse::<u64>().ok()? * 60;
+            total_secs += parts[1].parse::<u64>().ok()?;
+        }
+        3 => {
+            // HH:MM:SS
+            total_secs += parts[0].parse::<u64>().ok()? * 3600;
+            total_secs += parts[1].parse::<u64>().ok()? * 60;
+            total_secs += parts[2].parse::<u64>().ok()?;
+        }
+        _ => return None,
+    }
+
+    Some(total_secs)
+}
+
+#[cfg(not(target_os = "macos"))]
 fn get_boot_time() -> Option<u64> {
     let stat = fs::read_to_string("/proc/stat").ok()?;
     for line in stat.lines() {
@@ -262,18 +335,16 @@ mod tests {
     #[test]
     fn test_get_process_uptime_self() {
         let pid = process::id();
-        // On Linux with /proc, this should return Some
-        if Path::new("/proc/self/stat").exists() {
-            let uptime = get_process_uptime(pid);
-            assert!(uptime.is_some(), "Should be able to get uptime for self");
-            let uptime_str = uptime.unwrap();
-            // Should be a valid duration string (ends with 's')
-            assert!(
-                uptime_str.ends_with('s'),
-                "Uptime should end with 's': {}",
-                uptime_str
-            );
-        }
+        // This should work on both Linux (via /proc) and macOS (via ps)
+        let uptime = get_process_uptime(pid);
+        assert!(uptime.is_some(), "Should be able to get uptime for self");
+        let uptime_str = uptime.unwrap();
+        // Should be a valid duration string (ends with 's')
+        assert!(
+            uptime_str.ends_with('s'),
+            "Uptime should end with 's': {}",
+            uptime_str
+        );
     }
 
     #[test]
@@ -283,6 +354,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn test_get_boot_time() {
         if Path::new("/proc/stat").exists() {
             let boot_time = get_boot_time();
@@ -388,5 +460,36 @@ mod tests {
         // user lookup works; the real integration is tested manually.
         let user = User::from_name("clawshell").unwrap().unwrap();
         assert!(user.uid.as_raw() > 0, "clawshell should not be UID 0");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_parse_etime_seconds() {
+        assert_eq!(parse_etime("42"), Some(42));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_parse_etime_minutes_seconds() {
+        assert_eq!(parse_etime("02:30"), Some(150)); // 2*60 + 30
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_parse_etime_hours_minutes_seconds() {
+        assert_eq!(parse_etime("01:30:45"), Some(5445)); // 1*3600 + 30*60 + 45
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_parse_etime_days() {
+        assert_eq!(parse_etime("2-03:30:45"), Some(185445)); // 2*86400 + 3*3600 + 30*60 + 45
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_parse_etime_invalid() {
+        assert_eq!(parse_etime("invalid"), None);
+        assert_eq!(parse_etime(""), None);
     }
 }
