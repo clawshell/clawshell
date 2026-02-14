@@ -50,7 +50,7 @@ fn make_app(upstream_url: &str) -> axum::Router {
 
     let state = AppState {
         key_manager: Arc::new(KeyManager::new(key_map)),
-        dlp_scanner: Arc::new(DlpScanner::new(&patterns).unwrap()),
+        dlp_scanner: Arc::new(DlpScanner::new(&patterns, false).unwrap()),
         proxy_client: Arc::new(ProxyClient::with_upstream_urls(
             upstream_urls,
             "2023-06-01".to_string(),
@@ -77,7 +77,7 @@ fn make_app_with_anthropic(upstream_url: &str) -> axum::Router {
 
     let state = AppState {
         key_manager: Arc::new(KeyManager::new(key_map)),
-        dlp_scanner: Arc::new(DlpScanner::new(&[]).unwrap()),
+        dlp_scanner: Arc::new(DlpScanner::new(&[], false).unwrap()),
         proxy_client: Arc::new(ProxyClient::with_upstream_urls(
             upstream_urls,
             "2023-06-01".to_string(),
@@ -701,7 +701,7 @@ async fn test_proxy_error_on_unreachable_upstream() {
                 .into_iter()
                 .collect(),
         )),
-        dlp_scanner: Arc::new(DlpScanner::new(&[]).unwrap()),
+        dlp_scanner: Arc::new(DlpScanner::new(&[], false).unwrap()),
         proxy_client: Arc::new(ProxyClient::with_upstream_urls(
             {
                 let mut urls = BTreeMap::new();
@@ -843,7 +843,7 @@ async fn test_anthropic_dlp_blocks_sensitive_data() {
 
     let state = AppState {
         key_manager: Arc::new(KeyManager::new(key_map)),
-        dlp_scanner: Arc::new(DlpScanner::new(&patterns).unwrap()),
+        dlp_scanner: Arc::new(DlpScanner::new(&patterns, false).unwrap()),
         proxy_client: Arc::new(ProxyClient::with_upstream_urls(
             upstream_urls,
             "2023-06-01".to_string(),
@@ -1009,7 +1009,7 @@ fn make_app_with_redact(upstream_url: &str) -> axum::Router {
 
     let state = AppState {
         key_manager: Arc::new(KeyManager::new(key_map)),
-        dlp_scanner: Arc::new(DlpScanner::with_response_scanning(&patterns, true).unwrap()),
+        dlp_scanner: Arc::new(DlpScanner::new(&patterns, true).unwrap()),
         proxy_client: Arc::new(ProxyClient::with_upstream_urls(
             upstream_urls,
             "2023-06-01".to_string(),
@@ -1206,7 +1206,7 @@ async fn test_response_dlp_disabled() {
     upstream_urls.insert(Provider::Anthropic, mock_server.uri());
     let state = AppState {
         key_manager: Arc::new(KeyManager::new(key_map)),
-        dlp_scanner: Arc::new(DlpScanner::with_response_scanning(&patterns, false).unwrap()),
+        dlp_scanner: Arc::new(DlpScanner::new(&patterns, false).unwrap()),
         proxy_client: Arc::new(ProxyClient::with_upstream_urls(
             upstream_urls,
             "2023-06-01".to_string(),

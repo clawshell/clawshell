@@ -47,7 +47,7 @@ impl AppState {
         Self {
             key_manager: Arc::new(KeyManager::new(config.key_map())),
             dlp_scanner: Arc::new(
-                DlpScanner::with_response_scanning(&config.dlp.patterns, config.dlp.scan_responses)
+                DlpScanner::new(&config.dlp.patterns, config.dlp.scan_responses)
                     .expect("Failed to compile DLP patterns"),
             ),
             proxy_client: Arc::new(ProxyClient::with_upstream_urls(
