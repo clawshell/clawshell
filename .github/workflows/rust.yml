@@ -47,7 +47,7 @@ jobs:
 
   audit:
     runs-on: ubuntu-latest
-    name: Cargo audit
+    name: Cargo udeps and audit
     needs: linter
 
     steps:
