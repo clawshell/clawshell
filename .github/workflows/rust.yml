@@ -67,4 +67,4 @@ jobs:
       run: cargo +nightly udeps --verbose
 
     - name: Run cargo audit
-      run: cargo audit --verbose
+      run: cargo audit
