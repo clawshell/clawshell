@@ -5,8 +5,10 @@
 > **Powered by Runta. The essential safety harness for OpenClaw's PII & Sensitive Credentials.**
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/clawshell/clawshell)
-[![Version](https://img.shields.io/badge/version-0.0.1-orange.svg)]()
+[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/clawshell/clawshell/rust.yml)](https://github.com/clawshell/clawshell/actions)
+[![NPM Version](https://img.shields.io/npm/v/%40clawshell%2Fclawshell)](https://www.npmjs.com/package/@clawshell/clawshell)
+[![Crates.io Version](https://img.shields.io/crates/v/clawshell)](https://crates.io/crates/clawshell)
+
 
 ## 📖 Introduction
 
