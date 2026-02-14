@@ -8,7 +8,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # https://github.com/xd009642/tarpaulin
   TARPAULIN_VERSION: 0.35.1
+  # https://github.com/est31/cargo-udeps
+  UDEPS_VERSION: 0.1.60
+  # https://github.com/rustsec/rustsec
+  AUDIT_VERSION: 0.22.1
 
 jobs:
   linter:
@@ -37,5 +42,25 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
-    - name: Run coverage
+    - name: Run tarpaulin
       run: cargo tarpaulin --verbose
+
+  audit:
+    runs-on: ubuntu-latest
+    name: Cargo audit
+    needs: linter
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install cargo-udeps
+      run: cargo install cargo-udeps@${{ env.UDEPS_VERSION }} --locked
+
+    - name: Install cargo-audit
+      run: cargo install cargo-audit@${{ env.AUDIT_VERSION }} --locked
+
+    - name: Run cargo udeps
+      run: cargo udeps --verbose
+
+    - name: Run cargo audit
+      run: cargo audit --verbose
