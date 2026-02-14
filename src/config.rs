@@ -60,6 +60,31 @@ pub struct UpstreamConfig {
     pub anthropic_base_url: Option<String>,
     #[serde(default = "default_anthropic_version")]
     pub anthropic_version: String,
+
+    /// Connection timeout in seconds. This is the maximum time to wait for a
+    /// TCP connection to be established with the upstream server.
+    /// Default: 30 seconds.
+    #[serde(default = "default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+
+    /// Request timeout in seconds. This is the maximum time to wait for the
+    /// entire request/response cycle, including connection, sending the request,
+    /// and receiving the response. For LLM APIs, this should be set high enough
+    /// to accommodate long-running completions.
+    /// Default: 300 seconds (5 minutes).
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+
+    /// Connection pool idle timeout in seconds. Connections that remain idle
+    /// longer than this duration will be closed.
+    /// Default: 90 seconds.
+    #[serde(default = "default_pool_idle_timeout_secs")]
+    pub pool_idle_timeout_secs: u64,
+
+    /// Maximum number of idle connections per host in the connection pool.
+    /// Default: 32.
+    #[serde(default = "default_pool_max_idle_per_host")]
+    pub pool_max_idle_per_host: usize,
 }
 
 fn default_anthropic_version() -> String {
@@ -68,6 +93,22 @@ fn default_anthropic_version() -> String {
 
 fn default_base_url() -> String {
     "https://api.openai.com".to_string()
+}
+
+fn default_connect_timeout_secs() -> u64 {
+    30
+}
+
+fn default_request_timeout_secs() -> u64 {
+    300 // 5 minutes - LLM completions can take a while
+}
+
+fn default_pool_idle_timeout_secs() -> u64 {
+    90
+}
+
+fn default_pool_max_idle_per_host() -> usize {
+    32
 }
 
 #[derive(Debug, Deserialize, Clone)]

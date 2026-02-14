@@ -11,6 +11,22 @@ port = 18790
 base_url = "https://api.openai.com"
 anthropic_base_url = "https://api.anthropic.com"
 
+# HTTP client timeout and connection pool settings.
+# These control how ClawShell connects to upstream LLM APIs.
+
+# Maximum time (seconds) to wait for TCP connection establishment.
+# connect_timeout_secs = 30
+
+# Maximum time (seconds) for the entire request/response cycle.
+# LLM completions can take several minutes, so this is set high by default.
+# request_timeout_secs = 300
+
+# How long (seconds) idle connections stay in the pool before being closed.
+# pool_idle_timeout_secs = 90
+
+# Maximum number of idle connections to keep per host.
+# pool_max_idle_per_host = 32
+
 # Virtual-to-real API key mappings
 # Multiple virtual keys can map to the same real key.
 # The "provider" field determines which upstream to use ("openai" or "anthropic").
