@@ -21,7 +21,7 @@ use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
+use axum::routing::{any, get};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
@@ -76,12 +76,84 @@ impl AppState {
 /// Maximum request body size (10 MiB).
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
+/// Build the application router with health check endpoints and proxy routes.
+///
+/// # Endpoints
+///
+/// - `GET /health` - Liveness probe. Returns 200 if the service is running.
+///   Use this for Kubernetes liveness probes.
+///
+/// - `GET /ready` - Readiness probe. Returns 200 if the service is ready to
+///   accept traffic (has valid configuration). Use this for Kubernetes
+///   readiness probes.
+///
+/// - All other routes are proxied to the upstream LLM API after DLP scanning.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        // Health check endpoints (no auth required, no DLP scanning)
+        .route("/health", get(health_handler))
+        .route("/ready", get(ready_handler))
+        // Proxy all other requests to upstream
         .route("/", any(handle_request))
         .route("/{*path}", any(handle_request))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(state)
+}
+
+/// Liveness probe handler.
+///
+/// Returns 200 OK if the service is running. This endpoint performs no
+/// additional checks - if the HTTP server can respond, the service is "alive".
+///
+/// Response body:
+/// ```json
+/// { "status": "ok" }
+/// ```
+async fn health_handler() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "status": "ok"
+        })),
+    )
+}
+
+/// Readiness probe handler.
+///
+/// Returns 200 OK if the service is ready to accept traffic. Currently checks
+/// that the service has been properly initialized with at least one API key
+/// mapping configured.
+///
+/// Response body on success:
+/// ```json
+/// { "status": "ready", "keys_configured": true }
+/// ```
+///
+/// Response body when not ready (503):
+/// ```json
+/// { "status": "not_ready", "reason": "no API keys configured" }
+/// ```
+async fn ready_handler(State(state): State<AppState>) -> impl IntoResponse {
+    // Check if we have at least one key mapping configured
+    let has_keys = !state.key_manager.is_empty();
+
+    if has_keys {
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "status": "ready",
+                "keys_configured": true
+            })),
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": "no API keys configured"
+            })),
+        )
+    }
 }
 
 async fn handle_request(

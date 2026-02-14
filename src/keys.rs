@@ -52,6 +52,19 @@ impl KeyManager {
         }
         result
     }
+
+    /// Returns true if no key mappings are configured.
+    ///
+    /// This is used by the readiness probe to determine if the service
+    /// has been properly configured before accepting traffic.
+    pub fn is_empty(&self) -> bool {
+        self.mappings.is_empty()
+    }
+
+    /// Returns the number of configured key mappings.
+    pub fn len(&self) -> usize {
+        self.mappings.len()
+    }
 }
 
 #[cfg(test)]
@@ -124,5 +137,20 @@ mod tests {
         let resolved = km.resolve("vk-ant").unwrap();
         assert_eq!(resolved.real_key, "sk-ant-key");
         assert_eq!(resolved.provider, Provider::Anthropic);
+    }
+
+    #[test]
+    fn test_is_empty_true() {
+        let km = KeyManager::new(BTreeMap::new());
+        assert!(km.is_empty());
+        assert_eq!(km.len(), 0);
+    }
+
+    #[test]
+    fn test_is_empty_false() {
+        let map = make_map(vec![("vk-1", "sk-real-1", Provider::Openai)]);
+        let km = KeyManager::new(map);
+        assert!(!km.is_empty());
+        assert_eq!(km.len(), 1);
     }
 }
