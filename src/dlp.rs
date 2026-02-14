@@ -1,4 +1,5 @@
 use regex::bytes::Regex;
+use std::borrow::Cow;
 use tracing::{debug, trace};
 
 use crate::config::{DlpAction, DlpPattern};
@@ -96,14 +97,14 @@ impl DlpScanner {
         let mut was_redacted = false;
 
         for p in &self.patterns {
-            if p.action == DlpAction::Redact && p.regex.is_match(&redacted) {
-                debug!(pattern = %p.name, "Redact pattern matched, masking PII");
+            if p.action == DlpAction::Redact {
                 let replacement = format!("[REDACTED:{}]", p.name);
-                redacted = p
-                    .regex
-                    .replace_all(&redacted, replacement.as_bytes())
-                    .to_vec();
-                was_redacted = true;
+                let cow = p.regex.replace_all(&redacted, replacement.as_bytes());
+                if matches!(cow, Cow::Owned(_)) {
+                    debug!(pattern = %p.name, "Redact pattern matched, masking PII");
+                    redacted = cow.into_owned();
+                    was_redacted = true;
+                }
             }
         }
 
@@ -127,13 +128,11 @@ impl DlpScanner {
         let mut redacted_names = Vec::new();
 
         for p in &self.patterns {
-            if p.regex.is_match(&redacted) {
+            let replacement = format!("[REDACTED:{}]", p.name);
+            let cow = p.regex.replace_all(&redacted, replacement.as_bytes());
+            if matches!(cow, Cow::Owned(_)) {
                 debug!(pattern = %p.name, "Pattern matched in response, redacting");
-                let replacement = format!("[REDACTED:{}]", p.name);
-                redacted = p
-                    .regex
-                    .replace_all(&redacted, replacement.as_bytes())
-                    .to_vec();
+                redacted = cow.into_owned();
                 redacted_names.push(p.name.clone());
             }
         }
