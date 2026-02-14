@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio::signal;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use clawshell::cli::{Cli, Commands};
 use clawshell::config::Config;
@@ -498,19 +498,31 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
         "clawshell:clawshell"
     };
 
-    let _ = std::process::Command::new("chmod")
+    if let Err(e) = std::process::Command::new("chmod")
         .args(["0700", &config_dir.to_string_lossy()])
-        .status();
-    let _ = std::process::Command::new("chown")
+        .status()
+    {
+        warn!(path = %config_dir.display(), error = %e, "Failed to chmod config directory");
+    }
+    if let Err(e) = std::process::Command::new("chown")
         .args(["-R", chown_spec, &config_dir.to_string_lossy()])
-        .status();
-    let _ = std::process::Command::new("chown")
+        .status()
+    {
+        warn!(path = %config_dir.display(), error = %e, "Failed to chown config directory");
+    }
+    if let Err(e) = std::process::Command::new("chown")
         .args(["-R", chown_spec, &log_dir_path.to_string_lossy()])
-        .status();
+        .status()
+    {
+        warn!(path = %log_dir_path.display(), error = %e, "Failed to chown log directory");
+    }
     if let Some(pid_parent) = pid_path.parent() {
-        let _ = std::process::Command::new("chown")
+        if let Err(e) = std::process::Command::new("chown")
             .args([chown_spec, &pid_parent.to_string_lossy()])
-            .status();
+            .status()
+        {
+            warn!(path = %pid_parent.display(), error = %e, "Failed to chown PID directory");
+        }
     }
     tui::print_step_done(3, TOTAL_STEPS, "Permissions set");
 
