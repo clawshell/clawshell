@@ -1358,7 +1358,10 @@ mod tests {
 
         let existing = load_existing_config_from(&dir).unwrap();
         assert_eq!(existing.provider.as_deref(), Some("anthropic"));
-        assert_eq!(existing.model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+        assert_eq!(
+            existing.model.as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
         assert_eq!(existing.real_api_key.as_deref(), Some("sk-ant-existing"));
         assert_eq!(
             existing.virtual_api_key.as_deref(),

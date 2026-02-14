@@ -1505,8 +1505,7 @@ async fn test_non_utf8_body_passes_through() {
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"text": "hello world"})),
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"text": "hello world"})),
         )
         .mount(&mock_server)
         .await;
