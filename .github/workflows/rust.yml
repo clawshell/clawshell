@@ -15,6 +15,10 @@ env:
   # https://github.com/rustsec/rustsec
   AUDIT_VERSION: 0.22.1
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   linter:
     runs-on: ubuntu-latest
