@@ -52,7 +52,7 @@ fn test_version_output() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lower = stdout.to_lowercase();
     assert!(lower.contains("clawshell"));
-    assert!(stdout.contains("v0.1.0"));
+    assert!(stdout.contains("v0.0.1"));
     assert!(lower.contains("openclaw"));
 }
 
