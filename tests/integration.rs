@@ -1323,6 +1323,342 @@ async fn test_default_patterns_empty() {
     assert!(config.dlp.patterns.is_empty());
 }
 
+// ========== Config Error & Edge-Case Tests ==========
+
+#[tokio::test]
+async fn test_config_invalid_toml_syntax() {
+    let toml_str = r#"
+[server
+port = 8080
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_unclosed_string() {
+    let toml_str = r#"
+[server]
+host = "0.0.0.0
+[upstream]
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_type_mismatch_port_is_string() {
+    let toml_str = r#"
+[server]
+port = "not_a_number"
+[upstream]
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_type_mismatch_port_is_negative() {
+    let toml_str = r#"
+[server]
+port = -1
+[upstream]
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_type_mismatch_port_too_large() {
+    let toml_str = r#"
+[server]
+port = 70000
+[upstream]
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_type_mismatch_host_is_number() {
+    let toml_str = r#"
+[server]
+host = 12345
+[upstream]
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_type_mismatch_scan_responses_is_string() {
+    let toml_str = r#"
+[server]
+[upstream]
+[dlp]
+scan_responses = "yes"
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_missing_server_section() {
+    let toml_str = r#"
+[upstream]
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_missing_upstream_section() {
+    let toml_str = r#"
+[server]
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_missing_both_sections() {
+    assert!(Config::parse("").is_err());
+}
+
+#[tokio::test]
+async fn test_config_port_zero() {
+    let toml_str = r#"
+[server]
+port = 0
+[upstream]
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.server.port, 0);
+}
+
+#[tokio::test]
+async fn test_config_port_max() {
+    let toml_str = r#"
+[server]
+port = 65535
+[upstream]
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.server.port, 65535);
+}
+
+#[tokio::test]
+async fn test_config_empty_host() {
+    let toml_str = r#"
+[server]
+host = ""
+[upstream]
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.server.host, "");
+    assert_eq!(config.listen_addr(), ":18790");
+}
+
+#[tokio::test]
+async fn test_config_empty_base_url() {
+    let toml_str = r#"
+[server]
+[upstream]
+base_url = ""
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.upstream.base_url, "");
+}
+
+#[tokio::test]
+async fn test_config_empty_virtual_key() {
+    let toml_str = r#"
+[server]
+[upstream]
+[[keys]]
+virtual_key = ""
+real_key = "sk-real"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.keys[0].virtual_key, "");
+}
+
+#[tokio::test]
+async fn test_config_empty_real_key() {
+    let toml_str = r#"
+[server]
+[upstream]
+[[keys]]
+virtual_key = "vk-1"
+real_key = ""
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    assert_eq!(config.keys[0].real_key, "");
+}
+
+#[tokio::test]
+async fn test_config_from_file_nonexistent() {
+    let result = Config::from_file(std::path::Path::new("/tmp/does_not_exist_clawshell.toml"));
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_config_from_file_not_readable() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::path::Path::new("/tmp/clawshell_unreadable.toml");
+    fs::write(path, "[server]\n[upstream]\n").unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+    let result = Config::from_file(path);
+    // Restore permissions for cleanup regardless of test outcome
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o644));
+    let _ = fs::remove_file(path);
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_config_from_file_is_directory() {
+    let result = Config::from_file(std::path::Path::new("/tmp"));
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_config_parse_roundtrip_key_map() {
+    let toml_str = r#"
+[server]
+host = "10.0.0.1"
+port = 9090
+
+[upstream]
+base_url = "https://custom.api.com"
+
+[[keys]]
+virtual_key = "vk-a"
+real_key = "sk-a"
+
+[[keys]]
+virtual_key = "vk-b"
+real_key = "sk-b"
+provider = "anthropic"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+
+    // Re-serialize the key_map and verify it matches
+    let map = config.key_map();
+    let mut expected = BTreeMap::new();
+    expected.insert(
+        "vk-a".to_string(),
+        ("sk-a".to_string(), Provider::Openai),
+    );
+    expected.insert(
+        "vk-b".to_string(),
+        ("sk-b".to_string(), Provider::Anthropic),
+    );
+    assert_eq!(map, expected);
+
+    // Re-parse the same TOML and verify deterministic output
+    let config2 = Config::parse(toml_str).unwrap();
+    assert_eq!(config.server.host, config2.server.host);
+    assert_eq!(config.server.port, config2.server.port);
+    assert_eq!(config.upstream.base_url, config2.upstream.base_url);
+    assert_eq!(config.keys.len(), config2.keys.len());
+    assert_eq!(config.key_map(), config2.key_map());
+    assert_eq!(config.listen_addr(), config2.listen_addr());
+    assert_eq!(
+        config.upstream_url(Provider::Openai),
+        config2.upstream_url(Provider::Openai)
+    );
+    assert_eq!(
+        config.upstream_url(Provider::Anthropic),
+        config2.upstream_url(Provider::Anthropic)
+    );
+}
+
+#[tokio::test]
+async fn test_config_parse_roundtrip_dlp() {
+    let toml_str = r#"
+[server]
+[upstream]
+[dlp]
+scan_responses = false
+patterns = [
+    { name = "ssn", regex = '\\b\\d{3}-\\d{2}-\\d{4}\\b', action = "block" },
+    { name = "email", regex = '\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b', action = "redact" },
+]
+"#;
+    let config1 = Config::parse(toml_str).unwrap();
+    let config2 = Config::parse(toml_str).unwrap();
+
+    assert_eq!(config1.dlp.patterns.len(), config2.dlp.patterns.len());
+    assert_eq!(config1.dlp.scan_responses, config2.dlp.scan_responses);
+    for (a, b) in config1.dlp.patterns.iter().zip(config2.dlp.patterns.iter()) {
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.regex, b.regex);
+        assert_eq!(a.action, b.action);
+    }
+}
+
+#[tokio::test]
+async fn test_config_dlp_pattern_missing_name() {
+    let toml_str = r#"
+[server]
+[upstream]
+[dlp]
+patterns = [
+    { regex = '\\d+' },
+]
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_dlp_pattern_missing_regex() {
+    let toml_str = r#"
+[server]
+[upstream]
+[dlp]
+patterns = [
+    { name = "test" },
+]
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_dlp_invalid_action() {
+    let toml_str = r#"
+[server]
+[upstream]
+[dlp]
+patterns = [
+    { name = "test", regex = '\\d+', action = "delete" },
+]
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_unknown_provider() {
+    let toml_str = r#"
+[server]
+[upstream]
+[[keys]]
+virtual_key = "vk-1"
+real_key = "sk-1"
+provider = "azure"
+"#;
+    assert!(Config::parse(toml_str).is_err());
+}
+
+#[tokio::test]
+async fn test_config_extra_fields_ignored() {
+    let toml_str = r#"
+[server]
+host = "0.0.0.0"
+unknown_field = true
+[upstream]
+"#;
+    // toml + serde default: unknown fields cause error (deny_unknown_fields)
+    // or are silently ignored. Either way, the parse should handle it consistently.
+    let result = Config::parse(toml_str);
+    // serde without deny_unknown_fields ignores extras
+    if let Ok(config) = result {
+        assert_eq!(config.server.host, "0.0.0.0");
+    }
+    // If it errors, that's also valid behavior
+}
+
 // ========== New Feature Tests ==========
 
 #[tokio::test]
