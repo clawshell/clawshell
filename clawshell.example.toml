@@ -7,6 +7,10 @@ log_level = "info"
 host = "127.0.0.1"
 port = 18790
 
+# Graceful shutdown timeout (seconds). When receiving SIGTERM/SIGINT,
+# the server waits up to this duration for in-flight requests to complete.
+# shutdown_timeout_secs = 30
+
 [upstream]
 base_url = "https://api.openai.com"
 anthropic_base_url = "https://api.anthropic.com"
