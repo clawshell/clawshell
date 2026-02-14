@@ -1537,10 +1537,7 @@ provider = "anthropic"
     // Re-serialize the key_map and verify it matches
     let map = config.key_map();
     let mut expected = BTreeMap::new();
-    expected.insert(
-        "vk-a".to_string(),
-        ("sk-a".to_string(), Provider::Openai),
-    );
+    expected.insert("vk-a".to_string(), ("sk-a".to_string(), Provider::Openai));
     expected.insert(
         "vk-b".to_string(),
         ("sk-b".to_string(), Provider::Anthropic),
