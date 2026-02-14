@@ -64,7 +64,7 @@ jobs:
       run: cargo install cargo-audit@${{ env.AUDIT_VERSION }} --locked
 
     - name: Run cargo udeps
-      run: cargo udeps --verbose
+      run: cargo +nightly udeps --verbose
 
     - name: Run cargo audit
       run: cargo audit --verbose
