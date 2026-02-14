@@ -38,8 +38,8 @@ provider = "anthropic"
 
 # Data Loss Prevention (DLP)
 # Each pattern has a name, a regex, and an action.
-# action = "redact" (default): Reject the request with 400 Bad Request.
-# action = "redact": Replace matches with [REDACTED:<name>] and forward.
+# action = "block": Reject the request with 400 Bad Request.
+# action = "redact" (default): Replace matches with [REDACTED:<name>] and forward.
 # scan_responses: When true, upstream responses are also scanned and PII is redacted.
 [dlp]
 scan_responses = false
