@@ -15,20 +15,7 @@ pub struct KeyManager {
 }
 
 impl KeyManager {
-    pub fn new(mappings: BTreeMap<String, (String, Provider)>) -> Self {
-        let mappings: BTreeMap<String, ResolvedKey> = mappings
-            .into_iter()
-            .map(|(vk, (rk, provider))| {
-                trace!(virtual_key = %vk, provider = ?provider, "Registering virtual key");
-                (
-                    vk,
-                    ResolvedKey {
-                        real_key: rk,
-                        provider,
-                    },
-                )
-            })
-            .collect();
+    pub fn new(mappings: BTreeMap<String, ResolvedKey>) -> Self {
         debug!(key_count = mappings.len(), "Key manager initialized");
         Self { mappings }
     }
@@ -71,10 +58,18 @@ impl KeyManager {
 mod tests {
     use super::*;
 
-    fn make_map(entries: Vec<(&str, &str, Provider)>) -> BTreeMap<String, (String, Provider)> {
+    fn make_map(entries: Vec<(&str, &str, Provider)>) -> BTreeMap<String, ResolvedKey> {
         entries
             .into_iter()
-            .map(|(vk, rk, p)| (vk.to_string(), (rk.to_string(), p)))
+            .map(|(vk, rk, p)| {
+                (
+                    vk.to_string(),
+                    ResolvedKey {
+                        real_key: rk.to_string(),
+                        provider: p,
+                    },
+                )
+            })
             .collect()
     }
 

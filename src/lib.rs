@@ -13,7 +13,7 @@ pub mod tui;
 
 use crate::config::{Config, Provider};
 use crate::dlp::DlpScanner;
-use crate::keys::KeyManager;
+use crate::keys::{KeyManager, ResolvedKey};
 use crate::proxy::ProxyClient;
 
 use axum::Router;
@@ -44,8 +44,23 @@ impl AppState {
             Provider::Anthropic,
             config.upstream_url(Provider::Anthropic),
         );
+
+        let key_mappings = config
+            .key_map()
+            .iter()
+            .map(|(virtual_key, (real_key, provider))| {
+                (
+                    virtual_key.clone(),
+                    ResolvedKey {
+                        real_key: real_key.clone(),
+                        provider: *provider,
+                    },
+                )
+            })
+            .collect();
+
         Self {
-            key_manager: Arc::new(KeyManager::new(config.key_map())),
+            key_manager: Arc::new(KeyManager::new(key_mappings)),
             dlp_scanner: Arc::new(
                 DlpScanner::with_response_scanning(&config.dlp.patterns, config.dlp.scan_responses)
                     .expect("Failed to compile DLP patterns"),

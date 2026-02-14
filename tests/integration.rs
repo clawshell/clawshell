@@ -3,15 +3,15 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use bytes::Bytes;
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
 use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use bytes::Bytes;
 use clawshell::config::{Config, DlpAction, DlpPattern, Provider};
 use clawshell::dlp::DlpScanner;
-use clawshell::keys::KeyManager;
+use clawshell::keys::{KeyManager, ResolvedKey};
 use clawshell::proxy::ProxyClient;
 use clawshell::{AppState, build_router};
 
@@ -19,11 +19,17 @@ fn make_app(upstream_url: &str) -> axum::Router {
     let mut key_map = BTreeMap::new();
     key_map.insert(
         "vk-test-1".to_string(),
-        ("sk-real-1".to_string(), Provider::Openai),
+        ResolvedKey {
+            real_key: "sk-real-1".to_string(),
+            provider: Provider::Openai,
+        },
     );
     key_map.insert(
         "vk-test-2".to_string(),
-        ("sk-real-2".to_string(), Provider::Openai),
+        ResolvedKey {
+            real_key: "sk-real-2".to_string(),
+            provider: Provider::Openai,
+        },
     );
 
     let patterns = vec![
@@ -64,11 +70,17 @@ fn make_app_with_anthropic(upstream_url: &str) -> axum::Router {
     let mut key_map = BTreeMap::new();
     key_map.insert(
         "vk-test-1".to_string(),
-        ("sk-real-1".to_string(), Provider::Openai),
+        ResolvedKey {
+            real_key: "sk-real-1".to_string(),
+            provider: Provider::Openai,
+        },
     );
     key_map.insert(
         "vk-ant-1".to_string(),
-        ("sk-ant-real-1".to_string(), Provider::Anthropic),
+        ResolvedKey {
+            real_key: "sk-ant-real-1".to_string(),
+            provider: Provider::Anthropic,
+        },
     );
 
     let mut upstream_urls = BTreeMap::new();
@@ -697,9 +709,15 @@ async fn test_proxy_error_on_unreachable_upstream() {
     // Point to a definitely-unreachable address
     let state = AppState {
         key_manager: Arc::new(KeyManager::new(
-            [("vk-1".to_string(), ("sk-1".to_string(), Provider::Openai))]
-                .into_iter()
-                .collect(),
+            [(
+                "vk-1".to_string(),
+                ResolvedKey {
+                    real_key: "sk-1".to_string(),
+                    provider: Provider::Openai,
+                },
+            )]
+            .into_iter()
+            .collect(),
         )),
         dlp_scanner: Arc::new(DlpScanner::new(&[]).unwrap()),
         proxy_client: Arc::new(ProxyClient::with_upstream_urls(
@@ -828,7 +846,10 @@ async fn test_anthropic_dlp_blocks_sensitive_data() {
     let mut key_map = BTreeMap::new();
     key_map.insert(
         "vk-ant-dlp".to_string(),
-        ("sk-ant-key".to_string(), Provider::Anthropic),
+        ResolvedKey {
+            real_key: "sk-ant-key".to_string(),
+            provider: Provider::Anthropic,
+        },
     );
 
     let patterns = vec![DlpPattern {
@@ -982,7 +1003,10 @@ fn make_app_with_redact(upstream_url: &str) -> axum::Router {
     let mut key_map = BTreeMap::new();
     key_map.insert(
         "vk-test-1".to_string(),
-        ("sk-real-1".to_string(), Provider::Openai),
+        ResolvedKey {
+            real_key: "sk-real-1".to_string(),
+            provider: Provider::Openai,
+        },
     );
 
     let patterns = vec![
@@ -1194,7 +1218,10 @@ async fn test_response_dlp_disabled() {
     let mut key_map = BTreeMap::new();
     key_map.insert(
         "vk-test-1".to_string(),
-        ("sk-real-1".to_string(), Provider::Openai),
+        ResolvedKey {
+            real_key: "sk-real-1".to_string(),
+            provider: Provider::Openai,
+        },
     );
     let patterns = vec![DlpPattern {
         name: "email".to_string(),
