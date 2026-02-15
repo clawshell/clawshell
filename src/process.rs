@@ -221,12 +221,20 @@ mod tests {
 
     #[test]
     fn test_write_and_read_pid_file() {
-        // Ensure the PID directory exists (may need permissions)
-        if let Some(parent) = pid_file_path().parent()
-            && fs::create_dir_all(parent).is_err()
-        {
-            eprintln!("Skipping test_write_and_read_pid_file: cannot create PID dir");
-            return;
+        let pid_path = pid_file_path();
+        // Ensure the PID directory exists and is writable
+        if let Some(parent) = pid_path.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                eprintln!("Skipping test_write_and_read_pid_file: cannot create PID dir");
+                return;
+            }
+            // Check we can actually write in this directory
+            let probe = parent.join(".clawshell_write_probe");
+            if fs::write(&probe, b"").is_err() {
+                eprintln!("Skipping test_write_and_read_pid_file: PID dir not writable");
+                return;
+            }
+            let _ = fs::remove_file(&probe);
         }
         let test_pid = process::id();
         write_pid_file(test_pid).unwrap();
