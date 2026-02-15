@@ -3,6 +3,7 @@ use crate::tui;
 use serde_json::Value;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use vfs::VfsPath;
 
 /// API keys detected from an existing OpenClaw installation.
 #[derive(Debug, Default)]
@@ -34,10 +35,29 @@ fn detect_openclaw_api_keys() -> DetectedKeys {
 
 /// Inner implementation that accepts an explicit home dir for testability.
 fn detect_openclaw_api_keys_with_home(home: Option<&str>) -> DetectedKeys {
+    let root = crate::process::physical_root();
+    match home {
+        Some(h) => match root.join(h.trim_start_matches('/')) {
+            Ok(home_vfs) => detect_openclaw_api_keys_vfs(&home_vfs),
+            Err(_) => DetectedKeys {
+                anthropic: std::env::var("ANTHROPIC_API_KEY").ok(),
+                openai: std::env::var("OPENAI_API_KEY").ok(),
+            },
+        },
+        None => DetectedKeys {
+            anthropic: std::env::var("ANTHROPIC_API_KEY").ok(),
+            openai: std::env::var("OPENAI_API_KEY").ok(),
+        },
+    }
+}
+
+/// VFS implementation of API key detection from filesystem sources.
+/// Falls back to environment variables for any keys not found on the filesystem.
+fn detect_openclaw_api_keys_vfs(home: &VfsPath) -> DetectedKeys {
     let mut keys = DetectedKeys::default();
 
     // Find the state directory
-    let state_dir = match home.and_then(find_state_dir) {
+    let state_dir = match find_state_dir_vfs(home) {
         Some(d) => d,
         None => {
             // Fall back to env vars only
@@ -48,11 +68,11 @@ fn detect_openclaw_api_keys_with_home(home: Option<&str>) -> DetectedKeys {
     };
 
     // Strategy 1: auth-profiles.json
-    try_auth_profiles(&state_dir, &mut keys);
+    try_auth_profiles_vfs(&state_dir, &mut keys);
 
     // Strategy 2: .env file
     if keys.anthropic.is_none() || keys.openai.is_none() {
-        try_dot_env(&state_dir, &mut keys);
+        try_dot_env_vfs(&state_dir, &mut keys);
     }
 
     // Strategy 3: environment variables
@@ -66,28 +86,35 @@ fn detect_openclaw_api_keys_with_home(home: Option<&str>) -> DetectedKeys {
     keys
 }
 
-/// Find the first existing OpenClaw state directory.
-fn find_state_dir(home: &str) -> Option<PathBuf> {
+/// Find the first existing OpenClaw state directory (VFS variant).
+fn find_state_dir_vfs(home: &VfsPath) -> Option<VfsPath> {
     let candidates = [".openclaw", ".clawdbot", ".moltbot", ".moldbot"];
     for name in &candidates {
-        let path = PathBuf::from(home).join(name);
-        if path.is_dir() {
-            return Some(path);
+        if let Ok(path) = home.join(name) {
+            if path.exists().unwrap_or(false) {
+                return Some(path);
+            }
         }
     }
     None
 }
 
-/// Scan auth-profiles.json files for API keys.
-fn try_auth_profiles(state_dir: &Path, keys: &mut DetectedKeys) {
-    let agents_dir = state_dir.join("agents");
-    let entries = match std::fs::read_dir(&agents_dir) {
+/// Scan auth-profiles.json files for API keys (VFS variant).
+fn try_auth_profiles_vfs(state_dir: &VfsPath, keys: &mut DetectedKeys) {
+    let agents_dir = match state_dir.join("agents") {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let entries = match agents_dir.read_dir() {
         Ok(e) => e,
         Err(_) => return,
     };
-    for entry in entries.flatten() {
-        let profile_path = entry.path().join("agent").join("auth-profiles.json");
-        if let Ok(content) = std::fs::read_to_string(&profile_path)
+    for entry in entries {
+        let profile_path = match entry.join("agent/auth-profiles.json") {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if let Ok(content) = profile_path.read_to_string()
             && let Ok(json) = serde_json::from_str::<Value>(&content)
             && let Some(profiles) = json.get("profiles").and_then(|p| p.as_object())
         {
@@ -116,13 +143,21 @@ fn try_auth_profiles(state_dir: &Path, keys: &mut DetectedKeys) {
     }
 }
 
-/// Parse a .env file for API keys.
-fn try_dot_env(state_dir: &Path, keys: &mut DetectedKeys) {
-    let env_path = state_dir.join(".env");
-    let content = match std::fs::read_to_string(&env_path) {
+/// Parse a .env file for API keys (VFS variant).
+fn try_dot_env_vfs(state_dir: &VfsPath, keys: &mut DetectedKeys) {
+    let env_path = match state_dir.join(".env") {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let content = match env_path.read_to_string() {
         Ok(c) => c,
         Err(_) => return,
     };
+    parse_dot_env_content(&content, keys);
+}
+
+/// Shared .env parsing logic.
+fn parse_dot_env_content(content: &str, keys: &mut DetectedKeys) {
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -313,18 +348,20 @@ pub fn default_openclaw_config_path() -> String {
 /// Try to load an existing onboarding configuration from the config directory.
 /// Returns `None` if no previous config exists or it can't be read.
 fn load_existing_config() -> Option<ExistingConfig> {
-    load_existing_config_from(&PathBuf::from("/etc/clawshell"))
+    let root = crate::process::physical_root();
+    let config_dir = root.join("etc/clawshell").ok()?;
+    load_existing_config_from_vfs(&config_dir)
 }
 
-/// Inner implementation that accepts an explicit config directory for testability.
-fn load_existing_config_from(config_dir: &Path) -> Option<ExistingConfig> {
-    let config_file = config_dir.join("config.json");
-    let toml_file = config_dir.join("clawshell.toml");
+/// VFS implementation for loading existing config from a directory.
+fn load_existing_config_from_vfs(config_dir: &VfsPath) -> Option<ExistingConfig> {
+    let config_file = config_dir.join("config.json").ok()?;
+    let toml_file = config_dir.join("clawshell.toml").ok()?;
 
     let mut existing = ExistingConfig::default();
 
     // Read config.json for provider, model, virtual_api_key, openclaw_config_path
-    if let Ok(content) = std::fs::read_to_string(&config_file)
+    if let Ok(content) = config_file.read_to_string()
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
     {
         existing.provider = json
@@ -347,7 +384,7 @@ fn load_existing_config_from(config_dir: &Path) -> Option<ExistingConfig> {
     }
 
     // Read clawshell.toml for server host/port
-    if let Ok(content) = std::fs::read_to_string(&toml_file)
+    if let Ok(content) = toml_file.read_to_string()
         && let Ok(toml) = content.parse::<toml::Table>()
         && let Some(server) = toml.get("server").and_then(|s| s.as_table())
     {
@@ -574,24 +611,27 @@ patterns = [
     )
 }
 
-/// Backup the OpenClaw configuration file.
-/// Returns the backup path on success.
-pub fn backup_openclaw_config(openclaw_path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if !openclaw_path.exists() {
+/// Core backup logic (VFS variant) — copies the file and handles numbered backups.
+/// Does NOT apply Unix permissions or chown (MemoryFS doesn't support those).
+pub(crate) fn backup_openclaw_config_vfs(
+    openclaw_path: &VfsPath,
+) -> Result<VfsPath, Box<dyn std::error::Error>> {
+    if !openclaw_path.exists()? {
         return Err(format!(
             "OpenClaw configuration file not found at: {}",
-            openclaw_path.display()
+            openclaw_path.as_str()
         )
         .into());
     }
 
-    let base_backup = openclaw_path.with_file_name("openclaw.json.clawshell.bak");
-    let backup_path = if base_backup.exists() {
+    let parent = openclaw_path.parent();
+    let base_backup = parent.join("openclaw.json.clawshell.bak")?;
+    let backup_path = if base_backup.exists()? {
         // Find the next available numbered backup
         let mut n = 1u32;
         loop {
-            let numbered = openclaw_path.with_file_name(format!("openclaw.json.clawshell.bak.{n}"));
-            if !numbered.exists() {
+            let numbered = parent.join(format!("openclaw.json.clawshell.bak.{n}"))?;
+            if !numbered.exists()? {
                 break numbered;
             }
             n += 1;
@@ -599,7 +639,20 @@ pub fn backup_openclaw_config(openclaw_path: &Path) -> Result<PathBuf, Box<dyn s
     } else {
         base_backup
     };
-    std::fs::copy(openclaw_path, &backup_path)?;
+
+    let content = openclaw_path.read_to_string()?;
+    backup_path.create_file()?.write_all(content.as_bytes())?;
+
+    Ok(backup_path)
+}
+
+/// Backup the OpenClaw configuration file.
+/// Returns the backup path on success.
+pub fn backup_openclaw_config(openclaw_path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let root = crate::process::physical_root();
+    let vfs_path = root.join(openclaw_path.to_string_lossy().trim_start_matches('/'))?;
+    let backup_vfs = backup_openclaw_config_vfs(&vfs_path)?;
+    let backup_path = PathBuf::from(backup_vfs.as_str());
 
     // Lock down the backup so no user can read it (contains sensitive config).
     // Restore requires `sudo chmod 600` first.
@@ -740,6 +793,7 @@ fn ensure_nested_object(json: &mut Value, keys: &[&str]) {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use vfs::MemoryFS;
 
     fn test_config() -> OnboardConfig {
         OnboardConfig {
@@ -751,6 +805,16 @@ mod tests {
             server_host: "127.0.0.1".to_string(),
             server_port: 18790,
         }
+    }
+
+    /// Create a VFS helper that writes content to a path, creating parent dirs.
+    fn vfs_write(root: &VfsPath, path: &str, content: &str) {
+        let p = root.join(path).unwrap();
+        p.parent().create_dir_all().unwrap();
+        p.create_file()
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
     }
 
     #[test]
@@ -986,68 +1050,70 @@ mod tests {
 
     #[test]
     fn test_backup_openclaw_config() {
-        use std::os::unix::fs::PermissionsExt;
+        let root = VfsPath::new(MemoryFS::new());
+        let config_path = root.join("home/user/openclaw.json").unwrap();
+        config_path.parent().create_dir_all().unwrap();
+        config_path
+            .create_file()
+            .unwrap()
+            .write_all(br#"{"test": true}"#)
+            .unwrap();
 
-        let dir = std::env::temp_dir().join("clawshell_test_backup");
-        let _ = std::fs::create_dir_all(&dir);
-        let config_path = dir.join("openclaw.json");
-        std::fs::write(&config_path, r#"{"test": true}"#).unwrap();
+        let backup_path = backup_openclaw_config_vfs(&config_path).unwrap();
+        assert_eq!(
+            backup_path.as_str(),
+            "/home/user/openclaw.json.clawshell.bak"
+        );
+        assert!(backup_path.exists().unwrap());
 
-        let backup_path = backup_openclaw_config(&config_path).unwrap();
-        assert_eq!(backup_path, dir.join("openclaw.json.clawshell.bak"));
-        assert!(backup_path.exists());
-
-        // Verify backup is locked down (mode 000)
-        let perms = std::fs::metadata(&backup_path).unwrap().permissions();
-        assert_eq!(perms.mode() & 0o777, 0o000);
-
-        // Restore read permission to verify content, then clean up
-        std::fs::set_permissions(&backup_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let backup_content = std::fs::read_to_string(&backup_path).unwrap();
+        let backup_content = backup_path.read_to_string().unwrap();
         assert_eq!(backup_content, r#"{"test": true}"#);
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_backup_openclaw_config_numbered() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = std::env::temp_dir().join("clawshell_test_backup_numbered");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
-        let config_path = dir.join("openclaw.json");
+        let root = VfsPath::new(MemoryFS::new());
+        let config_path = root.join("home/user/openclaw.json").unwrap();
+        config_path.parent().create_dir_all().unwrap();
 
         // First backup: creates .bak
-        std::fs::write(&config_path, r#"{"v": 0}"#).unwrap();
-        let bak0 = backup_openclaw_config(&config_path).unwrap();
-        assert_eq!(bak0, dir.join("openclaw.json.clawshell.bak"));
+        config_path
+            .create_file()
+            .unwrap()
+            .write_all(br#"{"v": 0}"#)
+            .unwrap();
+        let bak0 = backup_openclaw_config_vfs(&config_path).unwrap();
+        assert_eq!(bak0.as_str(), "/home/user/openclaw.json.clawshell.bak");
 
         // Second backup: .bak exists, creates .bak.1
-        std::fs::write(&config_path, r#"{"v": 1}"#).unwrap();
-        let bak1 = backup_openclaw_config(&config_path).unwrap();
-        assert_eq!(bak1, dir.join("openclaw.json.clawshell.bak.1"));
+        config_path
+            .create_file()
+            .unwrap()
+            .write_all(br#"{"v": 1}"#)
+            .unwrap();
+        let bak1 = backup_openclaw_config_vfs(&config_path).unwrap();
+        assert_eq!(bak1.as_str(), "/home/user/openclaw.json.clawshell.bak.1");
 
         // Third backup: .bak and .bak.1 exist, creates .bak.2
-        std::fs::write(&config_path, r#"{"v": 2}"#).unwrap();
-        let bak2 = backup_openclaw_config(&config_path).unwrap();
-        assert_eq!(bak2, dir.join("openclaw.json.clawshell.bak.2"));
+        config_path
+            .create_file()
+            .unwrap()
+            .write_all(br#"{"v": 2}"#)
+            .unwrap();
+        let bak2 = backup_openclaw_config_vfs(&config_path).unwrap();
+        assert_eq!(bak2.as_str(), "/home/user/openclaw.json.clawshell.bak.2");
 
         // Verify contents
-        std::fs::set_permissions(&bak0, std::fs::Permissions::from_mode(0o600)).unwrap();
-        std::fs::set_permissions(&bak1, std::fs::Permissions::from_mode(0o600)).unwrap();
-        std::fs::set_permissions(&bak2, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(std::fs::read_to_string(&bak0).unwrap(), r#"{"v": 0}"#);
-        assert_eq!(std::fs::read_to_string(&bak1).unwrap(), r#"{"v": 1}"#);
-        assert_eq!(std::fs::read_to_string(&bak2).unwrap(), r#"{"v": 2}"#);
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(bak0.read_to_string().unwrap(), r#"{"v": 0}"#);
+        assert_eq!(bak1.read_to_string().unwrap(), r#"{"v": 1}"#);
+        assert_eq!(bak2.read_to_string().unwrap(), r#"{"v": 2}"#);
     }
 
     #[test]
     fn test_backup_openclaw_config_missing_file() {
-        let result = backup_openclaw_config(Path::new("/nonexistent/openclaw.json"));
+        let root = VfsPath::new(MemoryFS::new());
+        let config_path = root.join("nonexistent/openclaw.json").unwrap();
+        let result = backup_openclaw_config_vfs(&config_path);
         assert!(result.is_err());
     }
 
@@ -1152,58 +1218,43 @@ mod tests {
 
     #[test]
     fn test_detect_keys_from_auth_profiles() {
-        let dir = std::env::temp_dir().join("clawshell_test_detect_auth");
-        let _ = std::fs::remove_dir_all(&dir);
-        let state_dir = dir.join(".openclaw");
-        let agent_dir = state_dir.join("agents").join("myagent").join("agent");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-
+        let root = VfsPath::new(MemoryFS::new());
         let profiles = serde_json::json!({
             "profiles": {
                 "anthropic:default": { "key": "sk-ant-detect-123" },
                 "openai:default": { "key": "sk-oai-detect-456" }
             }
         });
-        std::fs::write(
-            agent_dir.join("auth-profiles.json"),
-            serde_json::to_string(&profiles).unwrap(),
-        )
-        .unwrap();
+        vfs_write(
+            &root,
+            "home/user/.openclaw/agents/myagent/agent/auth-profiles.json",
+            &serde_json::to_string(&profiles).unwrap(),
+        );
 
-        let keys = detect_openclaw_api_keys_with_home(Some(dir.to_str().unwrap()));
+        let home = root.join("home/user").unwrap();
+        let keys = detect_openclaw_api_keys_vfs(&home);
         assert_eq!(keys.anthropic.as_deref(), Some("sk-ant-detect-123"));
         assert_eq!(keys.openai.as_deref(), Some("sk-oai-detect-456"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_detect_keys_from_dot_env() {
-        let dir = std::env::temp_dir().join("clawshell_test_detect_dotenv");
-        let _ = std::fs::remove_dir_all(&dir);
-        let state_dir = dir.join(".openclaw");
-        std::fs::create_dir_all(&state_dir).unwrap();
-
-        std::fs::write(
-            state_dir.join(".env"),
+        let root = VfsPath::new(MemoryFS::new());
+        vfs_write(
+            &root,
+            "home/user/.openclaw/.env",
             "ANTHROPIC_API_KEY=sk-ant-env-789\nOPENAI_API_KEY=sk-oai-env-012\n",
-        )
-        .unwrap();
+        );
 
-        let keys = detect_openclaw_api_keys_with_home(Some(dir.to_str().unwrap()));
+        let home = root.join("home/user").unwrap();
+        let keys = detect_openclaw_api_keys_vfs(&home);
         assert_eq!(keys.anthropic.as_deref(), Some("sk-ant-env-789"));
         assert_eq!(keys.openai.as_deref(), Some("sk-oai-env-012"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_detect_keys_auth_profiles_takes_priority_over_dot_env() {
-        let dir = std::env::temp_dir().join("clawshell_test_detect_priority");
-        let _ = std::fs::remove_dir_all(&dir);
-        let state_dir = dir.join(".openclaw");
-        let agent_dir = state_dir.join("agents").join("a1").join("agent");
-        std::fs::create_dir_all(&agent_dir).unwrap();
+        let root = VfsPath::new(MemoryFS::new());
 
         // auth-profiles has only anthropic
         let profiles = serde_json::json!({
@@ -1211,83 +1262,69 @@ mod tests {
                 "anthropic:default": { "key": "sk-ant-from-profile" }
             }
         });
-        std::fs::write(
-            agent_dir.join("auth-profiles.json"),
-            serde_json::to_string(&profiles).unwrap(),
-        )
-        .unwrap();
+        vfs_write(
+            &root,
+            "home/user/.openclaw/agents/a1/agent/auth-profiles.json",
+            &serde_json::to_string(&profiles).unwrap(),
+        );
 
         // .env has both
-        std::fs::write(
-            state_dir.join(".env"),
+        vfs_write(
+            &root,
+            "home/user/.openclaw/.env",
             "ANTHROPIC_API_KEY=sk-ant-from-env\nOPENAI_API_KEY=sk-oai-from-env\n",
-        )
-        .unwrap();
+        );
 
-        let keys = detect_openclaw_api_keys_with_home(Some(dir.to_str().unwrap()));
+        let home = root.join("home/user").unwrap();
+        let keys = detect_openclaw_api_keys_vfs(&home);
         // anthropic from auth-profiles wins
         assert_eq!(keys.anthropic.as_deref(), Some("sk-ant-from-profile"));
         // openai falls through to .env
         assert_eq!(keys.openai.as_deref(), Some("sk-oai-from-env"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_detect_keys_no_state_dir() {
-        let dir = std::env::temp_dir().join("clawshell_test_detect_none");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let root = VfsPath::new(MemoryFS::new());
+        // Create a home dir with no .openclaw etc.
+        root.join("home/user").unwrap().create_dir_all().unwrap();
 
-        // No .openclaw etc. directories exist
-        let keys = detect_openclaw_api_keys_with_home(Some(dir.to_str().unwrap()));
-        // Without env vars set for this test, should be None
-        // (env vars may or may not be set in the test environment, so we just
-        // verify the function doesn't panic)
+        let home = root.join("home/user").unwrap();
+        // Should not panic — keys come from env vars (or be None)
+        let keys = detect_openclaw_api_keys_vfs(&home);
         let _ = keys;
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_detect_keys_fallback_state_dirs() {
-        let dir = std::env::temp_dir().join("clawshell_test_detect_fallback");
-        let _ = std::fs::remove_dir_all(&dir);
+        let root = VfsPath::new(MemoryFS::new());
 
         // Only .clawdbot exists (second candidate)
-        let state_dir = dir.join(".clawdbot");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(
-            state_dir.join(".env"),
+        vfs_write(
+            &root,
+            "home/user/.clawdbot/.env",
             "ANTHROPIC_API_KEY=sk-ant-clawdbot\n",
-        )
-        .unwrap();
+        );
 
-        let keys = detect_openclaw_api_keys_with_home(Some(dir.to_str().unwrap()));
+        let home = root.join("home/user").unwrap();
+        let keys = detect_openclaw_api_keys_vfs(&home);
         assert_eq!(keys.anthropic.as_deref(), Some("sk-ant-clawdbot"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_detect_keys_dot_env_skips_empty_and_comments() {
-        let dir = std::env::temp_dir().join("clawshell_test_detect_env_parse");
-        let _ = std::fs::remove_dir_all(&dir);
-        let state_dir = dir.join(".openclaw");
-        std::fs::create_dir_all(&state_dir).unwrap();
-
-        std::fs::write(
-            state_dir.join(".env"),
+        let root = VfsPath::new(MemoryFS::new());
+        vfs_write(
+            &root,
+            "home/user/.openclaw/.env",
             "# comment\n\nANTHROPIC_API_KEY=\"sk-quoted\"\nOPENAI_API_KEY=\n",
-        )
-        .unwrap();
+        );
 
-        let keys = detect_openclaw_api_keys_with_home(Some(dir.to_str().unwrap()));
+        let home = root.join("home/user").unwrap();
+        let keys = detect_openclaw_api_keys_vfs(&home);
         assert_eq!(keys.anthropic.as_deref(), Some("sk-quoted"));
         // Empty value should be skipped
         assert!(keys.openai.is_none() || keys.openai.as_deref() != Some(""));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1347,9 +1384,7 @@ mod tests {
 
     #[test]
     fn test_load_existing_config_from_temp_dir() {
-        let dir = std::env::temp_dir().join("clawshell_test_load_existing");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let root = VfsPath::new(MemoryFS::new());
 
         // Write config.json
         let config_json = serde_json::json!({
@@ -1359,20 +1394,21 @@ mod tests {
             "virtual_api_key": "{clawshell-virtual-key-anthropic}",
             "openclaw_config_path": "/home/user/.openclaw/openclaw.json"
         });
-        std::fs::write(
-            dir.join("config.json"),
-            serde_json::to_string_pretty(&config_json).unwrap(),
-        )
-        .unwrap();
+        vfs_write(
+            &root,
+            "etc/clawshell/config.json",
+            &serde_json::to_string_pretty(&config_json).unwrap(),
+        );
 
         // Write clawshell.toml
-        std::fs::write(
-            dir.join("clawshell.toml"),
+        vfs_write(
+            &root,
+            "etc/clawshell/clawshell.toml",
             "[server]\nhost = \"0.0.0.0\"\nport = 9999\n",
-        )
-        .unwrap();
+        );
 
-        let existing = load_existing_config_from(&dir).unwrap();
+        let config_dir = root.join("etc/clawshell").unwrap();
+        let existing = load_existing_config_from_vfs(&config_dir).unwrap();
         assert_eq!(existing.provider.as_deref(), Some("anthropic"));
         assert_eq!(
             existing.model.as_deref(),
@@ -1389,41 +1425,37 @@ mod tests {
         );
         assert_eq!(existing.server_host.as_deref(), Some("0.0.0.0"));
         assert_eq!(existing.server_port.as_deref(), Some("9999"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_load_existing_config_from_empty_dir() {
-        let dir = std::env::temp_dir().join("clawshell_test_load_existing_empty");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let root = VfsPath::new(MemoryFS::new());
+        root.join("etc/clawshell")
+            .unwrap()
+            .create_dir_all()
+            .unwrap();
 
-        let result = load_existing_config_from(&dir);
+        let config_dir = root.join("etc/clawshell").unwrap();
+        let result = load_existing_config_from_vfs(&config_dir);
         assert!(result.is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_load_existing_config_from_partial() {
-        let dir = std::env::temp_dir().join("clawshell_test_load_existing_partial");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let root = VfsPath::new(MemoryFS::new());
 
         // Only clawshell.toml, no config.json
-        std::fs::write(
-            dir.join("clawshell.toml"),
+        vfs_write(
+            &root,
+            "etc/clawshell/clawshell.toml",
             "[server]\nhost = \"127.0.0.1\"\nport = 18790\n",
-        )
-        .unwrap();
+        );
 
-        let existing = load_existing_config_from(&dir).unwrap();
+        let config_dir = root.join("etc/clawshell").unwrap();
+        let existing = load_existing_config_from_vfs(&config_dir).unwrap();
         assert!(existing.provider.is_none());
         assert_eq!(existing.server_host.as_deref(), Some("127.0.0.1"));
         assert_eq!(existing.server_port.as_deref(), Some("18790"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

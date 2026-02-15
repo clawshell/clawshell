@@ -27,6 +27,7 @@ clap = { version = "4.5.58", features = ["derive"] }
 nix = { version = "0.31.1", features = ["signal", "process", "feature", "user"] }
 inquire = "0.9.3"
 console = "0.16.2"
+vfs = "0.12"
 
 [dev-dependencies]
 tokio = { version = "1.49", features = ["full", "test-util"] }
@@ -40,3 +41,6 @@ predicates = "3"
 [[test]]
 name = "config_fixtures"
 harness = false
+
+[lints.clippy]
+collapsible_if = "allow"

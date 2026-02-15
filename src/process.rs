@@ -2,9 +2,11 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::{Gid, Pid, Uid, User, getuid, setgid, setuid};
 use nix::unistd::{SysconfVar, sysconf};
 use std::fs;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
+use vfs::VfsPath;
 
 /// Default configuration directory.
 pub const CONFIG_DIR: &str = "/etc/clawshell";
@@ -12,6 +14,25 @@ pub const CONFIG_DIR: &str = "/etc/clawshell";
 /// Default configuration file path.
 pub fn default_config_path() -> PathBuf {
     PathBuf::from(CONFIG_DIR).join("clawshell.toml")
+}
+
+/// Create a VFS root backed by the real filesystem.
+pub(crate) fn physical_root() -> VfsPath {
+    VfsPath::new(vfs::PhysicalFS::new("/"))
+}
+
+/// PID file path within a VFS root.
+fn pid_file_vfs(root: &VfsPath) -> Result<VfsPath, Box<dyn std::error::Error>> {
+    if cfg!(target_os = "macos") {
+        Ok(root.join("var/run/clawshell.pid")?)
+    } else {
+        Ok(root.join("run/clawshell/clawshell.pid")?)
+    }
+}
+
+/// Log file path within a VFS root.
+fn log_file_vfs(root: &VfsPath) -> Result<VfsPath, Box<dyn std::error::Error>> {
+    Ok(root.join("var/log/clawshell/clawshell.log")?)
 }
 
 /// PID file location.
@@ -32,30 +53,53 @@ pub fn log_file_path() -> PathBuf {
     PathBuf::from("/var/log/clawshell/clawshell.log")
 }
 
+/// Ensure the parent directories for PID and log files exist (VFS variant).
+pub(crate) fn ensure_runtime_dirs_vfs(root: &VfsPath) -> Result<(), Box<dyn std::error::Error>> {
+    let pid_path = pid_file_vfs(root)?;
+    pid_path.parent().create_dir_all()?;
+    let log_path = log_file_vfs(root)?;
+    log_path.parent().create_dir_all()?;
+    Ok(())
+}
+
 /// Ensure the parent directories for PID and log files exist.
 pub fn ensure_runtime_dirs() -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = pid_file_path().parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if let Some(parent) = log_file_path().parent() {
-        fs::create_dir_all(parent)?;
-    }
+    ensure_runtime_dirs_vfs(&physical_root())
+}
+
+/// Write a PID file (VFS variant).
+pub(crate) fn write_pid_file_vfs(
+    root: &VfsPath,
+    pid: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = pid_file_vfs(root)?;
+    path.create_file()?.write_all(pid.to_string().as_bytes())?;
     Ok(())
 }
 
 pub fn write_pid_file(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
-    fs::write(pid_file_path(), pid.to_string())?;
-    Ok(())
+    write_pid_file_vfs(&physical_root(), pid)
+}
+
+/// Read the PID from the PID file (VFS variant).
+pub(crate) fn read_pid_file_vfs(root: &VfsPath) -> Option<u32> {
+    let path = pid_file_vfs(root).ok()?;
+    path.read_to_string().ok()?.trim().parse().ok()
 }
 
 pub fn read_pid_file() -> Option<u32> {
-    fs::read_to_string(pid_file_path())
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
+    read_pid_file_vfs(&physical_root())
+}
+
+/// Remove the PID file (VFS variant).
+pub(crate) fn remove_pid_file_vfs(root: &VfsPath) {
+    if let Ok(path) = pid_file_vfs(root) {
+        let _ = path.remove_file();
+    }
 }
 
 pub fn remove_pid_file() {
-    let _ = fs::remove_file(pid_file_path());
+    remove_pid_file_vfs(&physical_root())
 }
 
 fn to_pid(pid: u32) -> Result<Pid, Box<dyn std::error::Error>> {
@@ -166,6 +210,7 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::process;
+    use vfs::MemoryFS;
 
     #[test]
     fn test_format_duration_seconds() {
@@ -221,27 +266,16 @@ mod tests {
 
     #[test]
     fn test_write_and_read_pid_file() {
-        let pid_path = pid_file_path();
-        // Ensure the PID directory exists and is writable
-        if let Some(parent) = pid_path.parent() {
-            if fs::create_dir_all(parent).is_err() {
-                eprintln!("Skipping test_write_and_read_pid_file: cannot create PID dir");
-                return;
-            }
-            // Check we can actually write in this directory
-            let probe = parent.join(".clawshell_write_probe");
-            if fs::write(&probe, b"").is_err() {
-                eprintln!("Skipping test_write_and_read_pid_file: PID dir not writable");
-                return;
-            }
-            let _ = fs::remove_file(&probe);
-        }
-        let test_pid = process::id();
-        write_pid_file(test_pid).unwrap();
-        let read_pid = read_pid_file().unwrap();
+        let root = VfsPath::new(MemoryFS::new());
+        ensure_runtime_dirs_vfs(&root).unwrap();
+
+        let test_pid = 12345u32;
+        write_pid_file_vfs(&root, test_pid).unwrap();
+        let read_pid = read_pid_file_vfs(&root).unwrap();
         assert_eq!(read_pid, test_pid);
-        remove_pid_file();
-        assert!(read_pid_file().is_none());
+
+        remove_pid_file_vfs(&root);
+        assert!(read_pid_file_vfs(&root).is_none());
     }
 
     #[test]
@@ -258,13 +292,13 @@ mod tests {
 
     #[test]
     fn test_ensure_runtime_dirs() {
-        // This may fail without root, but should not panic
-        let result = ensure_runtime_dirs();
-        // If we have permissions it succeeds; if not, it returns an error
-        if result.is_ok() {
-            assert!(pid_file_path().parent().unwrap().exists());
-            assert!(log_file_path().parent().unwrap().exists());
-        }
+        let root = VfsPath::new(MemoryFS::new());
+        ensure_runtime_dirs_vfs(&root).unwrap();
+
+        let pid_parent = pid_file_vfs(&root).unwrap().parent();
+        assert!(pid_parent.exists().unwrap());
+        let log_parent = log_file_vfs(&root).unwrap().parent();
+        assert!(log_parent.exists().unwrap());
     }
 
     #[test]
