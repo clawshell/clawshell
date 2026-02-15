@@ -839,7 +839,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     if service_exists {
         tui::print_info("Service", &service_path.display().to_string());
     }
-    tui::print_info("Binary", &exe_path.display().to_string());
+    tui::print_info("Binary", &format!("{} (preserved)", exe_path.display()));
     tui::print_info("System user", "clawshell");
     println!();
 
@@ -949,13 +949,11 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 7. Remove the binary itself (do this last)
+    // 7. Preserve the binary so users can still run clawshell later.
     if exe_path.exists() {
-        if let Err(e) = std::fs::remove_file(&exe_path) {
-            tui::print_warning(&format!("Could not remove binary: {e}."));
-        } else {
-            tui::print_success("Binary removed.");
-        }
+        tui::print_info("Binary", &format!("Preserved at {}", exe_path.display()));
+    } else {
+        tui::print_warning("Binary path no longer exists; skipping binary preservation check.");
     }
 
     println!();
