@@ -602,6 +602,36 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
         tui::print_info("Path", &openclaw_path.display().to_string());
     }
 
+    // Auto-start service setup (ask before step 9 so we can start via service manager)
+    let exe = std::env::current_exe()?;
+    let service_path = std::path::Path::new(onboard::autostart_service_path());
+    let service_exists = service_path.exists();
+    let prompt_msg = if service_exists {
+        "Auto-start service already exists. Reinstall it?"
+    } else {
+        "Install auto-start service so ClawShell starts on boot?"
+    };
+    let installed_service = tui::prompt_confirm(prompt_msg, !service_exists).unwrap_or(false);
+    if installed_service {
+        match onboard::install_autostart_service(&exe, &toml_config_path) {
+            Ok(()) => {
+                tui::print_success("Auto-start service installed.");
+                tui::print_info("Service", onboard::autostart_service_path());
+            }
+            Err(e) => {
+                tui::print_error(&format!("Failed to install auto-start service: {e}"));
+            }
+        }
+    } else {
+        tui::print_info(
+            "Skipped",
+            &format!(
+                "You can install later by placing a service file at: {}",
+                onboard::autostart_service_path()
+            ),
+        );
+    }
+
     // Step 9: Start or skip ClawShell
     let already_running = process::read_pid_file().is_some_and(process::is_process_running);
 
@@ -610,30 +640,20 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tui::print_step(9, TOTAL_STEPS, "Starting ClawShell...");
 
-        let exe = std::env::current_exe()?;
-        let log_path = process::log_file_path();
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)?;
-        let log_stderr = log_file.try_clone()?;
-
-        let child = std::process::Command::new(exe)
-            .args([
-                "start",
-                "--config",
-                &toml_config_path.to_string_lossy(),
-                "--foreground",
-            ])
-            .stdout(log_file)
-            .stderr(log_stderr)
-            .stdin(std::process::Stdio::null())
-            .spawn()?;
-
-        let pid = child.id();
-        process::write_pid_file(pid)?;
-        tui::print_step_done(9, TOTAL_STEPS, "ClawShell started");
-        tui::print_info("PID", &pid.to_string());
+        if installed_service {
+            // Start via the service manager so it manages the lifecycle
+            match onboard::start_autostart_service() {
+                Ok(()) => {
+                    tui::print_step_done(9, TOTAL_STEPS, "ClawShell started via service manager");
+                }
+                Err(e) => {
+                    tui::print_error(&format!("Failed to start via service manager: {e}"));
+                }
+            }
+        } else {
+            start_clawshell_direct(&toml_config_path)?;
+            tui::print_step_done(9, TOTAL_STEPS, "ClawShell started");
+        }
         tui::print_info("Logs", &process::log_file_path().display().to_string());
     }
 
@@ -808,11 +828,17 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| PathBuf::from("/var/log/clawshell"));
     let pid_file = process::pid_file_path();
 
+    let service_path = std::path::Path::new(clawshell::onboard::autostart_service_path());
+    let service_exists = service_path.exists();
+
     tui::print_warning("This will remove the following:");
     tui::print_info("ClawShell", "Stop if running");
     tui::print_info("Config dir", &config_dir.display().to_string());
     tui::print_info("Log dir", &log_dir.display().to_string());
     tui::print_info("PID file", &pid_file.display().to_string());
+    if service_exists {
+        tui::print_info("Service", &service_path.display().to_string());
+    }
     tui::print_info("Binary", &exe_path.display().to_string());
     tui::print_info("System user", "clawshell");
     println!();
@@ -860,7 +886,16 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 1. Stop ClawShell if running
+    // 1. Stop ClawShell and remove auto-start service
+    if service_exists {
+        tui::print_info("Action", "Stopping and removing auto-start service...");
+        match clawshell::onboard::remove_autostart_service() {
+            Ok(()) => tui::print_success("Auto-start service stopped and removed."),
+            Err(e) => tui::print_warning(&format!("Failed to remove auto-start service: {e}")),
+        }
+    }
+
+    // 2. Stop ClawShell if still running (e.g. started without service manager)
     if let Some(pid) = process::read_pid_file() {
         if process::is_process_running(pid) {
             tui::print_info("PID", &pid.to_string());
@@ -872,7 +907,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 2. Remove PID file (in case stop_process didn't clean it)
+    // 3. Remove PID file (in case stop_process didn't clean it)
     if pid_file.exists() {
         let _ = std::fs::remove_file(&pid_file);
         tui::print_success("PID file removed.");
@@ -884,19 +919,19 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::remove_dir(pid_dir);
     }
 
-    // 3. Remove log directory
+    // 4. Remove log directory
     if log_dir.exists() {
         std::fs::remove_dir_all(&log_dir)?;
         tui::print_success("Log directory removed.");
     }
 
-    // 4. Remove configuration directory
+    // 5. Remove configuration directory
     if config_dir.exists() {
         std::fs::remove_dir_all(&config_dir)?;
         tui::print_success("Configuration directory removed.");
     }
 
-    // 5. Remove the clawshell system user
+    // 6. Remove the clawshell system user
     let user_exists = std::process::Command::new("id")
         .arg("clawshell")
         .stdout(std::process::Stdio::null())
@@ -914,7 +949,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 6. Remove the binary itself (do this last)
+    // 7. Remove the binary itself (do this last)
     if exe_path.exists() {
         if let Err(e) = std::fs::remove_file(&exe_path) {
             tui::print_warning(&format!("Could not remove binary: {e}."));
@@ -1018,6 +1053,36 @@ fn create_macos_system_user(
         .status();
 
     Ok(status)
+}
+
+/// Start ClawShell directly by spawning a child process (no service manager).
+fn start_clawshell_direct(
+    toml_config_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()?;
+    let log_path = process::log_file_path();
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let log_stderr = log_file.try_clone()?;
+
+    let child = std::process::Command::new(exe)
+        .args([
+            "start",
+            "--config",
+            &toml_config_path.to_string_lossy(),
+            "--foreground",
+        ])
+        .stdout(log_file)
+        .stderr(log_stderr)
+        .stdin(std::process::Stdio::null())
+        .spawn()?;
+
+    let pid = child.id();
+    process::write_pid_file(pid)?;
+    tui::print_info("PID", &pid.to_string());
+    Ok(())
 }
 
 /// Delete a system user, using platform-appropriate commands.

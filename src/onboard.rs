@@ -789,6 +789,213 @@ fn ensure_nested_object(json: &mut Value, keys: &[&str]) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Auto-start service management (systemd / launchd)
+// ---------------------------------------------------------------------------
+
+/// Path to the systemd unit file for the ClawShell service.
+pub const SYSTEMD_SERVICE_PATH: &str = "/etc/systemd/system/clawshell.service";
+
+/// Path to the launchd plist file for the ClawShell service.
+pub const LAUNCHD_PLIST_PATH: &str = "/Library/LaunchDaemons/com.clawshell.daemon.plist";
+
+/// Return the platform-appropriate service file path.
+pub fn autostart_service_path() -> &'static str {
+    if cfg!(target_os = "macos") {
+        LAUNCHD_PLIST_PATH
+    } else {
+        SYSTEMD_SERVICE_PATH
+    }
+}
+
+/// Generate a systemd unit file for the ClawShell daemon.
+pub fn generate_systemd_unit(exe_path: &Path, config_path: &Path) -> String {
+    format!(
+        r#"[Unit]
+Description=ClawShell API proxy daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=clawshell
+Group=clawshell
+ExecStart={exe} start --config {config} --foreground
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/clawshell/clawshell.log
+StandardError=append:/var/log/clawshell/clawshell.log
+
+[Install]
+WantedBy=multi-user.target
+"#,
+        exe = exe_path.display(),
+        config = config_path.display(),
+    )
+}
+
+/// Generate a launchd plist file for the ClawShell daemon.
+pub fn generate_launchd_plist(exe_path: &Path, config_path: &Path) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.clawshell.daemon</string>
+    <key>UserName</key>
+    <string>clawshell</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>start</string>
+        <string>--config</string>
+        <string>{config}</string>
+        <string>--foreground</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/clawshell/clawshell.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/clawshell/clawshell.log</string>
+</dict>
+</plist>
+"#,
+        exe = exe_path.display(),
+        config = config_path.display(),
+    )
+}
+
+/// Write a service file to the given VFS path (testable with MemoryFS).
+pub fn install_autostart_service_vfs(
+    service_file: &VfsPath,
+    content: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    service_file.parent().create_dir_all()?;
+    service_file.create_file()?.write_all(content.as_bytes())?;
+    Ok(())
+}
+
+/// Remove a service file from the given VFS path (testable with MemoryFS).
+///
+/// Returns `Ok(true)` if the file was removed, `Ok(false)` if it didn't exist.
+pub fn remove_autostart_service_vfs(
+    service_file: &VfsPath,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if service_file.exists()? {
+        service_file.remove_file()?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Install the auto-start service on the real filesystem and enable it.
+pub fn install_autostart_service(
+    exe_path: &Path,
+    config_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let content = if cfg!(target_os = "macos") {
+        generate_launchd_plist(exe_path, config_path)
+    } else {
+        generate_systemd_unit(exe_path, config_path)
+    };
+
+    let service_path = autostart_service_path();
+    let root = crate::process::physical_root();
+    let vfs_path = root.join(service_path.trim_start_matches('/'))?;
+    install_autostart_service_vfs(&vfs_path, &content)?;
+
+    if cfg!(target_os = "macos") {
+        // Unload if already loaded so launchd picks up the new plist.
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", service_path])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::process::Command::new("chown")
+            .args(["root:wheel", service_path])
+            .status();
+        let _ = std::process::Command::new("chmod")
+            .args(["0644", service_path])
+            .status();
+        // Loading is done separately via start_autostart_service().
+    } else {
+        let status = std::process::Command::new("systemctl")
+            .args(["daemon-reload"])
+            .status()?;
+        if !status.success() {
+            return Err("systemctl daemon-reload failed".into());
+        }
+        let status = std::process::Command::new("systemctl")
+            .args(["enable", "clawshell.service"])
+            .status()?;
+        if !status.success() {
+            return Err("systemctl enable failed".into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Start the auto-start service via the platform service manager.
+pub fn start_autostart_service() -> Result<(), Box<dyn std::error::Error>> {
+    let service_path = autostart_service_path();
+
+    if cfg!(target_os = "macos") {
+        let status = std::process::Command::new("launchctl")
+            .args(["load", service_path])
+            .status()?;
+        if !status.success() {
+            return Err(format!("launchctl load failed (exit code {})", status).into());
+        }
+    } else {
+        let status = std::process::Command::new("systemctl")
+            .args(["start", "clawshell.service"])
+            .status()?;
+        if !status.success() {
+            return Err(format!("systemctl start failed (exit code {})", status).into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Remove the auto-start service from the real filesystem and disable it.
+pub fn remove_autostart_service() -> Result<(), Box<dyn std::error::Error>> {
+    let service_path = autostart_service_path();
+
+    if cfg!(target_os = "macos") {
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", service_path])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    } else {
+        let _ = std::process::Command::new("systemctl")
+            .args(["disable", "clawshell.service"])
+            .status();
+        let _ = std::process::Command::new("systemctl")
+            .args(["stop", "clawshell.service"])
+            .status();
+    }
+
+    let root = crate::process::physical_root();
+    let vfs_path = root.join(service_path.trim_start_matches('/'))?;
+    remove_autostart_service_vfs(&vfs_path)?;
+
+    if !cfg!(target_os = "macos") {
+        let _ = std::process::Command::new("systemctl")
+            .args(["daemon-reload"])
+            .status();
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1496,5 +1703,158 @@ mod tests {
         assert!(providers.contains_key("openai"));
 
         assert_eq!(json["extra_field"], 42);
+    }
+
+    // --- Auto-start service tests ---
+
+    #[test]
+    fn test_generate_systemd_unit_contains_required_fields() {
+        let content = generate_systemd_unit(
+            Path::new("/usr/local/bin/clawshell"),
+            Path::new("/etc/clawshell/clawshell.toml"),
+        );
+        assert!(content.contains("Type=exec"));
+        assert!(content.contains("User=clawshell"));
+        assert!(content.contains("Group=clawshell"));
+        assert!(content.contains("ExecStart=/usr/local/bin/clawshell start --config /etc/clawshell/clawshell.toml --foreground"));
+        assert!(content.contains("Restart=on-failure"));
+        assert!(content.contains("RestartSec=5"));
+        assert!(content.contains("After=network-online.target"));
+        assert!(content.contains("WantedBy=multi-user.target"));
+        assert!(content.contains("StandardOutput=append:/var/log/clawshell/clawshell.log"));
+        assert!(content.contains("StandardError=append:/var/log/clawshell/clawshell.log"));
+    }
+
+    #[test]
+    fn test_generate_systemd_unit_custom_paths() {
+        let content = generate_systemd_unit(
+            Path::new("/opt/clawshell/bin/cs"),
+            Path::new("/opt/clawshell/config.toml"),
+        );
+        assert!(content.contains(
+            "ExecStart=/opt/clawshell/bin/cs start --config /opt/clawshell/config.toml --foreground"
+        ));
+    }
+
+    #[test]
+    fn test_generate_launchd_plist_contains_required_fields() {
+        let content = generate_launchd_plist(
+            Path::new("/usr/local/bin/clawshell"),
+            Path::new("/etc/clawshell/clawshell.toml"),
+        );
+        assert!(content.contains("<string>com.clawshell.daemon</string>"));
+        assert!(content.contains("<string>clawshell</string>")); // UserName
+        assert!(content.contains("<key>KeepAlive</key>"));
+        assert!(content.contains("<true/>"));
+        assert!(content.contains("<key>RunAtLoad</key>"));
+        assert!(content.contains("<string>/usr/local/bin/clawshell</string>"));
+        assert!(content.contains("<string>/var/log/clawshell/clawshell.log</string>"));
+        assert!(content.contains("<key>ProgramArguments</key>"));
+    }
+
+    #[test]
+    fn test_generate_launchd_plist_custom_paths() {
+        let content = generate_launchd_plist(
+            Path::new("/opt/cs/bin/clawshell"),
+            Path::new("/opt/cs/config.toml"),
+        );
+        assert!(content.contains("<string>/opt/cs/bin/clawshell</string>"));
+        assert!(content.contains("<string>/opt/cs/config.toml</string>"));
+    }
+
+    #[test]
+    fn test_generate_launchd_plist_valid_xml_structure() {
+        let content = generate_launchd_plist(
+            Path::new("/usr/local/bin/clawshell"),
+            Path::new("/etc/clawshell/clawshell.toml"),
+        );
+        assert!(content.starts_with("<?xml version=\"1.0\""));
+        assert!(content.contains("<!DOCTYPE plist"));
+        assert!(content.contains("</plist>"));
+    }
+
+    #[test]
+    fn test_install_autostart_service_vfs_writes_file() {
+        let root = VfsPath::new(MemoryFS::new());
+        let service_file = root.join("etc/systemd/system/clawshell.service").unwrap();
+        let content = "test service content";
+
+        install_autostart_service_vfs(&service_file, content).unwrap();
+
+        assert!(service_file.exists().unwrap());
+        assert_eq!(service_file.read_to_string().unwrap(), content);
+    }
+
+    #[test]
+    fn test_install_autostart_service_vfs_creates_parent_dirs() {
+        let root = VfsPath::new(MemoryFS::new());
+        let service_file = root
+            .join("Library/LaunchDaemons/com.clawshell.daemon.plist")
+            .unwrap();
+
+        install_autostart_service_vfs(&service_file, "plist content").unwrap();
+
+        assert!(service_file.exists().unwrap());
+        assert!(
+            root.join("Library/LaunchDaemons")
+                .unwrap()
+                .exists()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_install_autostart_service_vfs_overwrites_existing() {
+        let root = VfsPath::new(MemoryFS::new());
+        let service_file = root.join("etc/systemd/system/clawshell.service").unwrap();
+
+        install_autostart_service_vfs(&service_file, "old content").unwrap();
+        install_autostart_service_vfs(&service_file, "new content").unwrap();
+
+        assert_eq!(service_file.read_to_string().unwrap(), "new content");
+    }
+
+    #[test]
+    fn test_remove_autostart_service_vfs_removes_existing() {
+        let root = VfsPath::new(MemoryFS::new());
+        let service_file = root.join("etc/systemd/system/clawshell.service").unwrap();
+
+        install_autostart_service_vfs(&service_file, "content").unwrap();
+        assert!(service_file.exists().unwrap());
+
+        let removed = remove_autostart_service_vfs(&service_file).unwrap();
+        assert!(removed);
+        assert!(!service_file.exists().unwrap());
+    }
+
+    #[test]
+    fn test_remove_autostart_service_vfs_missing_file() {
+        let root = VfsPath::new(MemoryFS::new());
+        let service_file = root.join("etc/systemd/system/clawshell.service").unwrap();
+
+        let removed = remove_autostart_service_vfs(&service_file).unwrap();
+        assert!(!removed);
+    }
+
+    #[test]
+    fn test_autostart_service_path_is_absolute() {
+        let path = autostart_service_path();
+        assert!(path.starts_with('/'));
+    }
+
+    #[test]
+    fn test_systemd_service_path_constant() {
+        assert_eq!(
+            SYSTEMD_SERVICE_PATH,
+            "/etc/systemd/system/clawshell.service"
+        );
+    }
+
+    #[test]
+    fn test_launchd_plist_path_constant() {
+        assert_eq!(
+            LAUNCHD_PLIST_PATH,
+            "/Library/LaunchDaemons/com.clawshell.daemon.plist"
+        );
     }
 }
