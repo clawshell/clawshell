@@ -34,6 +34,8 @@ tower = { version = "0.5.3", features = ["util"] }
 wiremock = "0.6"
 datatest-stable = "0.3"
 insta = { version = "1", features = ["yaml"] }
+assert_cmd = "2"
+predicates = "3"
 
 [[test]]
 name = "config_fixtures"
