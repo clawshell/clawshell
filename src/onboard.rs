@@ -208,6 +208,14 @@ pub fn collect_onboard_config(
     reader: &mut dyn BufRead,
     writer: &mut dyn Write,
 ) -> io::Result<OnboardConfig> {
+    collect_onboard_config_with_detected(reader, writer, detect_openclaw_api_keys())
+}
+
+fn collect_onboard_config_with_detected(
+    reader: &mut dyn BufRead,
+    writer: &mut dyn Write,
+    detected: DetectedKeys,
+) -> io::Result<OnboardConfig> {
     writeln!(writer)?;
     writeln!(writer, "--- API Configuration ---")?;
     writeln!(writer)?;
@@ -224,7 +232,6 @@ pub fn collect_onboard_config(
     let model = prompt_with_default(reader, writer, "Enter the model name", default_model)?;
 
     // Real API key — try to detect from OpenClaw installation
-    let detected = detect_openclaw_api_keys();
     let real_api_key = if let Some(detected_key) = detected.for_provider(&provider) {
         writeln!(
             writer,
@@ -824,7 +831,9 @@ mod tests {
         let input = b"1\n\nsk-test-key\n\n\n\n\n";
         let mut reader = Cursor::new(input.as_slice());
         let mut output = Vec::new();
-        let config = collect_onboard_config(&mut reader, &mut output).unwrap();
+        let config =
+            collect_onboard_config_with_detected(&mut reader, &mut output, DetectedKeys::default())
+                .unwrap();
         assert_eq!(config.provider, "openai");
         assert_eq!(config.model, "gpt-5.2-chat-latest");
         assert_eq!(config.real_api_key, "sk-test-key");
@@ -838,7 +847,9 @@ mod tests {
         let input = b"2\nclaude-opus-4-6\nsk-ant-test\nmy-virtual-key\n/custom/path.json\n192.168.1.1\n8080\n";
         let mut reader = Cursor::new(input.as_slice());
         let mut output = Vec::new();
-        let config = collect_onboard_config(&mut reader, &mut output).unwrap();
+        let config =
+            collect_onboard_config_with_detected(&mut reader, &mut output, DetectedKeys::default())
+                .unwrap();
         assert_eq!(config.provider, "anthropic");
         assert_eq!(config.model, "claude-opus-4-6");
         assert_eq!(config.real_api_key, "sk-ant-test");
@@ -856,7 +867,8 @@ mod tests {
         let input = b"1\n\n\n";
         let mut reader = Cursor::new(input.as_slice());
         let mut output = Vec::new();
-        let result = collect_onboard_config(&mut reader, &mut output);
+        let result =
+            collect_onboard_config_with_detected(&mut reader, &mut output, DetectedKeys::default());
         assert!(result.is_err());
     }
 
@@ -1309,7 +1321,11 @@ mod tests {
         let input = b"1\ngpt-5.2\nnew-key-123\nvk-test\n/tmp/oc.json\n127.0.0.1\n18790\n";
         let mut reader = Cursor::new(input.as_slice());
         let mut output = Vec::new();
-        let result = collect_onboard_config(&mut reader, &mut output);
+        let detected = DetectedKeys {
+            openai: Some("old-detected-key".to_string()),
+            ..DetectedKeys::default()
+        };
+        let result = collect_onboard_config_with_detected(&mut reader, &mut output, detected);
         assert!(result.is_ok());
         let config = result.unwrap();
         assert_eq!(config.real_api_key, "new-key-123");
