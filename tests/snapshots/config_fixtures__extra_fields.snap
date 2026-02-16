@@ -1,21 +1,9 @@
 ---
 source: tests/config_fixtures.rs
-expression: snapshot
+expression: err.to_string()
 ---
-server:
-  host: 0.0.0.0
-  port: 18790
-upstream:
-  base_url: "https://api.openai.com"
-  anthropic_base_url: ~
-  anthropic_version: 2023-06-01
-keys: []
-dlp:
-  patterns: []
-  scan_responses: true
-log_level: info
-derived:
-  listen_addr: "0.0.0.0:18790"
-  openai_upstream_url: "https://api.openai.com"
-  anthropic_upstream_url: "https://api.anthropic.com"
-  key_map: {}
+TOML parse error at line 3, column 1
+  |
+3 | unknown_field = true
+  | ^^^^^^^^^^^^^
+unknown field `unknown_field`, expected `host` or `port`

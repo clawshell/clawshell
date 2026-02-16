@@ -13,12 +13,11 @@ Run the full test suite:
 cargo test
 ```
 
-This executes three test binaries:
+This executes unit tests from `src/*` and integration tests from `tests/*`.
 
 | Binary | Source | What it covers |
 |---|---|---|
-| `integration` | `tests/integration.rs` | End-to-end proxy, DLP scanning, key mapping, AppState |
-| `config_fixtures` | `tests/config_fixtures.rs` | Config parsing via fixture files + insta snapshots |
+| `clawshell` | `src/*.rs` | Core behavior (config parsing/fixtures, migration helpers, proxy, app, onboarding) |
 | `cli_tests` | `tests/cli_tests.rs` | CLI argument handling |
 
 ### Config Fixture Tests
@@ -29,7 +28,6 @@ Config parsing is tested with a data-driven approach using [`datatest-stable`](h
 
 ```
 tests/
-  config_fixtures.rs            # test harness (no need to edit for new cases)
   fixtures/config/
     valid/                      # configs that must parse successfully
       minimal.toml
@@ -51,7 +49,8 @@ tests/
 1. Create a `.toml` file in `tests/fixtures/config/valid/` or `tests/fixtures/config/invalid/`.
 2. Run the tests — new cases will fail because no snapshot exists yet:
    ```sh
-   cargo test --test config_fixtures
+   cargo test config::tests::test_valid_config_fixtures
+   cargo test config::tests::test_invalid_config_fixtures
    ```
 3. Review and accept the new snapshots:
    ```sh
@@ -68,22 +67,6 @@ cargo insta test --review
 ```
 
 This runs all tests, then opens an interactive review for any changed snapshots.
-
-### Integration Tests
-
-Integration tests in `tests/integration.rs` use [`wiremock`](https://crates.io/crates/wiremock) to mock upstream API servers. They cover:
-
-- Proxy request forwarding and header injection
-- Virtual-to-real key resolution
-- DLP blocking and redaction (request and response)
-- Streaming response passthrough
-- Error handling (unknown keys, unsupported methods)
-
-Run only integration tests:
-
-```sh
-cargo test --test integration
-```
 
 ## Code Style
 

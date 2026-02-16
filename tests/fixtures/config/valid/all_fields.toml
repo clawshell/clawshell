@@ -5,7 +5,7 @@ host = "0.0.0.0"
 port = 8080
 
 [upstream]
-base_url = "https://custom.api.com"
+openai_base_url = "https://custom.api.com"
 anthropic_base_url = "https://custom.anthropic.com"
 anthropic_version = "2024-01-01"
 

@@ -21,7 +21,10 @@ impl Provider {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     pub server: ServerConfig,
     pub upstream: UpstreamConfig,
     #[serde(default)]
@@ -37,6 +40,7 @@ fn default_log_level() -> String {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_host")]
     pub host: String,
@@ -53,9 +57,10 @@ fn default_port() -> u16 {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct UpstreamConfig {
-    #[serde(default = "default_base_url")]
-    pub base_url: String,
+    #[serde(default = "default_openai_base_url")]
+    pub openai_base_url: String,
     #[serde(default)]
     pub anthropic_base_url: Option<String>,
     #[serde(default = "default_anthropic_version")]
@@ -66,11 +71,12 @@ fn default_anthropic_version() -> String {
     "2023-06-01".to_string()
 }
 
-fn default_base_url() -> String {
+fn default_openai_base_url() -> String {
     "https://api.openai.com".to_string()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct KeyMapping {
     pub virtual_key: String,
     pub real_key: String,
@@ -87,6 +93,7 @@ pub enum DlpAction {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct DlpConfig {
     #[serde(default)]
     pub patterns: Vec<DlpPattern>,
@@ -108,6 +115,7 @@ impl Default for DlpConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct DlpPattern {
     pub name: String,
     pub regex: String,
@@ -116,18 +124,22 @@ pub struct DlpPattern {
 }
 
 impl Config {
-    pub fn from_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = std::fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&content)?;
+    pub(crate) fn from_str_with_validation(
+        content: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let config: Config = toml::from_str(content)?;
         config.validate()?;
         Ok(config)
     }
 
+    pub fn from_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let content = std::fs::read_to_string(path)?;
+        Self::from_str_with_validation(&content)
+    }
+
     #[cfg(test)]
     pub fn parse(content: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let config: Config = toml::from_str(content)?;
-        config.validate()?;
-        Ok(config)
+        Self::from_str_with_validation(content)
     }
 
     fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -147,7 +159,7 @@ impl Config {
 
     pub fn upstream_url(&self, provider: Provider) -> String {
         match provider {
-            Provider::Openai => self.upstream.base_url.clone(),
+            Provider::Openai => self.upstream.openai_base_url.clone(),
             Provider::Anthropic => self
                 .upstream
                 .anthropic_base_url

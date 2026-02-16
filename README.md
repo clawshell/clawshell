@@ -146,6 +146,9 @@ clawshell logs --follow
 # Restart / Stop
 sudo clawshell restart
 sudo clawshell stop
+
+# Migrate config schema to current version
+sudo clawshell migrate-config
 ```
 
 By default ClawShell listens on `127.0.0.1:18790`.
@@ -162,6 +165,7 @@ sudo clawshell config --edit   # open in $EDITOR
 A minimal config looks like this:
 
 ```toml
+version = "0.0.2"
 log_level = "info"
 
 [server]
@@ -169,7 +173,7 @@ host = "127.0.0.1"
 port = 18790
 
 [upstream]
-base_url = "https://api.openai.com"
+openai_base_url = "https://api.openai.com"
 anthropic_base_url = "https://api.anthropic.com"
 
 # Virtual-to-real API key mappings
@@ -193,6 +197,12 @@ patterns = [
     { name = "visa_card", regex = '\b4[0-9]{12}(?:[0-9]{3})?\b',    action = "redact" },
     { name = "amex_card", regex = '\b3[47][0-9]{13}\b',              action = "redact" },
 ]
+```
+
+If `start`, `restart`, `stop`, `config --edit`, `onboard`, or `uninstall` reports that migration is required, run:
+
+```bash
+sudo clawshell migrate-config --config /etc/clawshell/clawshell.toml
 ```
 
 See [`clawshell.example.toml`](clawshell.example.toml) for a full example.

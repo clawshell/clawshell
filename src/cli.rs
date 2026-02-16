@@ -2,7 +2,7 @@ use crate::process;
 
 use clap::builder::Styles;
 use clap::builder::styling::{Ansi256Color, AnsiColor, Color, Effects, Style};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 fn default_config_path() -> String {
     process::default_config_path()
@@ -57,6 +57,7 @@ const fn cli_styles() -> Styles {
         clawshell logs --filter \"timeout\"     Filter logs by keyword\n  \
         clawshell config                      Display current configuration\n  \
         clawshell config --edit               Edit the configuration file\n  \
+        clawshell migrate-config              Migrate configuration to current schema\n  \
         clawshell onboard                     Set up the clawshell system user\n  \
         clawshell uninstall                   Remove ClawShell from the system\n  \
         clawshell version                     Show version information"
@@ -65,6 +66,11 @@ const fn cli_styles() -> Styles {
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OnAmbiguousOption {
+    Fail,
 }
 
 #[derive(Debug, Subcommand)]
@@ -127,6 +133,18 @@ pub enum Commands {
         /// Open the configuration file in an editor
         #[arg(short, long)]
         edit: bool,
+    },
+
+    /// Migrate configuration to the current schema version
+    #[command(before_help = BANNER)]
+    MigrateConfig {
+        /// Path to the configuration file
+        #[arg(short, long, default_value_t = default_config_path())]
+        config: String,
+
+        /// Ambiguous migration behavior (fail means non-interactive)
+        #[arg(long = "on-ambiguous", value_enum)]
+        on_ambiguous: Option<OnAmbiguousOption>,
     },
 
     /// Set up the clawshell system user and permissions

@@ -2,9 +2,37 @@ use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use predicates::str::contains;
+use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
 
 fn cmd() -> Command {
     cargo_bin_cmd!("clawshell")
+}
+
+fn temp_config_file() -> NamedTempFile {
+    NamedTempFile::new().unwrap()
+}
+
+fn write_config(path: &Path, with_version: bool) {
+    let version = if with_version {
+        format!("version = \"{}\"\n", env!("CARGO_PKG_VERSION"))
+    } else {
+        String::new()
+    };
+
+    let content = format!(
+        r#"{version}log_level = "info"
+
+[server]
+host = "127.0.0.1"
+port = 18790
+
+[upstream]
+base_url = "https://api.openai.com"
+"#
+    );
+
+    std::fs::write(path, content).unwrap();
 }
 
 #[cfg(target_os = "linux")]
@@ -51,6 +79,7 @@ fn test_help_output() {
         .stdout(contains("restart"))
         .stdout(contains("logs"))
         .stdout(contains("config"))
+        .stdout(contains("migrate-config"))
         .stdout(contains("onboard"))
         .stdout(contains("version"));
 }
@@ -119,6 +148,72 @@ fn test_config_display_example_file() {
         .stdout(contains("Configuration"))
         .stdout(contains("Listen:"))
         .stdout(contains("configured"));
+}
+
+#[test]
+fn test_migrate_config_missing_file() {
+    cmd()
+        .args(["migrate-config", "--config", "/nonexistent/config.toml"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_migrate_config_writes_version_and_backup() {
+    let temp = temp_config_file();
+    write_config(temp.path(), false);
+    let backup = PathBuf::from(format!("{}.bak", temp.path().display()));
+    let _ = std::fs::remove_file(&backup);
+
+    cmd()
+        .args([
+            "migrate-config",
+            "--config",
+            &temp.path().display().to_string(),
+        ])
+        .assert()
+        .success()
+        .stdout(contains("Migration completed"));
+
+    let migrated = std::fs::read_to_string(temp.path()).unwrap();
+    assert!(migrated.contains(&format!("version = \"{}\"", env!("CARGO_PKG_VERSION"))));
+    assert!(backup.exists());
+
+    let _ = std::fs::remove_file(&backup);
+}
+
+#[test]
+fn test_start_fails_if_migration_not_performed() {
+    let temp = temp_config_file();
+    write_config(temp.path(), false);
+
+    cmd()
+        .args([
+            "start",
+            "--config",
+            &temp.path().display().to_string(),
+            "--foreground",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("migrate-config"));
+}
+
+#[test]
+fn test_config_edit_fails_if_migration_not_performed() {
+    let temp = temp_config_file();
+    write_config(temp.path(), false);
+
+    cmd()
+        .args([
+            "config",
+            "--edit",
+            "--file",
+            &temp.path().display().to_string(),
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("migrate-config"));
 }
 
 /// Combined log tests to avoid race conditions on the shared log file.

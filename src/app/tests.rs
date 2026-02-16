@@ -541,7 +541,7 @@ async fn test_app_state_from_config() {
 host = "127.0.0.1"
 port = 3000
 [upstream]
-base_url = "https://api.openai.com"
+openai_base_url = "https://api.openai.com"
 [[keys]]
 virtual_key = "vk-1"
 real_key = "sk-real-1"
@@ -561,7 +561,7 @@ async fn test_app_state_from_config_with_anthropic() {
 host = "127.0.0.1"
 port = 3000
 [upstream]
-base_url = "https://api.openai.com"
+openai_base_url = "https://api.openai.com"
 anthropic_base_url = "https://api.anthropic.com"
 [[keys]]
 virtual_key = "vk-oai"

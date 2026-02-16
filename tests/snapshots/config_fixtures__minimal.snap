@@ -6,7 +6,7 @@ server:
   host: 127.0.0.1
   port: 18790
 upstream:
-  base_url: "https://api.openai.com"
+  openai_base_url: "https://api.openai.com"
   anthropic_base_url: ~
   anthropic_version: 2023-06-01
 keys: []

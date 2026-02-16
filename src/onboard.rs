@@ -434,6 +434,7 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
 pub fn generate_clawshell_config(config: &OnboardConfig) -> String {
     format!(
         r#"# ClawShell Configuration
+version = "{version}"
 log_level = "info"
 
 [server]
@@ -441,7 +442,7 @@ host = "{host}"
 port = {port}
 
 [upstream]
-base_url = "https://api.openai.com"
+openai_base_url = "https://api.openai.com"
 anthropic_base_url = "https://api.anthropic.com"
 
 [[keys]]
@@ -458,6 +459,7 @@ patterns = [
     {{ name = "amex_card",       regex = '\b3[47][0-9]{{13}}\b',                                                   action = "redact" }},
 ]
 "#,
+        version = env!("CARGO_PKG_VERSION"),
         host = config.server_host,
         port = config.server_port,
         virtual_key = config.virtual_api_key,
@@ -762,6 +764,7 @@ mod tests {
         assert!(toml_str.contains("real_key = \"sk-real-key-123\""));
         assert!(toml_str.contains("provider = \"openai\""));
         assert!(toml_str.contains("log_level = \"info\""));
+        assert!(toml_str.contains(&format!("version = \"{}\"", env!("CARGO_PKG_VERSION"))));
         assert!(toml_str.contains("[dlp]"));
         assert!(!toml_str.contains("[rate_limit]"));
     }

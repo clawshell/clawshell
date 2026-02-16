@@ -7,6 +7,7 @@ mod cli;
 mod config;
 mod dlp;
 mod keys;
+mod migration;
 mod onboard;
 mod platform;
 mod process;
@@ -14,6 +15,7 @@ mod proxy;
 mod tui;
 
 use clap::Parser;
+use std::error::Error;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -21,8 +23,101 @@ use tokio::signal;
 use tracing::{debug, info, warn};
 
 use crate::app::{AppState, build_router};
-use crate::cli::{Cli, Commands};
+use crate::cli::{Cli, Commands, OnAmbiguousOption};
 use crate::config::Config;
+use crate::migration::core::{
+    AmbiguityResolutionError, AmbiguityResolver, AmbiguousChoice, MigrationIssue,
+};
+use crate::migration::orchestrator;
+use crate::migration::target::MigrationTarget;
+use crate::migration::targets::clawshell_toml::{self, ClawshellTomlTarget, VersionGateStatus};
+
+#[derive(Debug)]
+struct InteractiveAmbiguityResolver;
+
+impl AmbiguityResolver for InteractiveAmbiguityResolver {
+    fn resolve(
+        &mut self,
+        issue: &MigrationIssue,
+    ) -> Result<AmbiguousChoice, AmbiguityResolutionError> {
+        tui::print_warning(&format!(
+            "Ambiguous migration step for target '{}' ({}): {}",
+            issue.target, issue.step_id, issue.message
+        ));
+        tui::print_info("Recommended", &issue.recommended.to_string());
+
+        let choice = tui::prompt_select(
+            "How should migration proceed?",
+            vec![
+                "Apply recommended".to_string(),
+                "Skip this step".to_string(),
+                "Abort migration".to_string(),
+            ],
+        )
+        .map_err(|e| AmbiguityResolutionError::Message(e.to_string()))?;
+
+        let decision = match choice.as_str() {
+            "Apply recommended" => AmbiguousChoice::ApplyRecommended,
+            "Skip this step" => AmbiguousChoice::Skip,
+            _ => AmbiguousChoice::Abort,
+        };
+        Ok(decision)
+    }
+}
+
+#[derive(Debug)]
+struct FailOnAmbiguousResolver;
+
+impl AmbiguityResolver for FailOnAmbiguousResolver {
+    fn resolve(
+        &mut self,
+        issue: &MigrationIssue,
+    ) -> Result<AmbiguousChoice, AmbiguityResolutionError> {
+        Err(AmbiguityResolutionError::Message(format!(
+            "Ambiguous migration step '{}' for target '{}': {}. Re-run without --on-ambiguous fail to resolve interactively.",
+            issue.step_id, issue.target, issue.message
+        )))
+    }
+}
+
+fn ensure_config_migrated(path: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    clawshell_toml::ensure_current_version(path).map_err(|e| {
+        format!(
+            "{}. Run 'clawshell migrate-config --config {}' to migrate to the current schema.",
+            e,
+            path.display()
+        )
+        .into()
+    })
+}
+
+fn ensure_default_config_migrated_if_present() -> Result<(), Box<dyn Error>> {
+    let path = process::default_config_path();
+    if path.exists() {
+        ensure_config_migrated(&path)?;
+    }
+    Ok(())
+}
+
+fn print_migration_status(path: &str, status: &VersionGateStatus) {
+    match status {
+        VersionGateStatus::Current(version) => {
+            tui::print_info("Schema version", &version.to_string());
+        }
+        VersionGateStatus::Missing => {
+            tui::print_warning("Schema version: missing (migration required)");
+            tui::print_info("Run", &format!("clawshell migrate-config --config {path}"));
+        }
+        VersionGateStatus::Mismatch { found } => {
+            tui::print_warning(&format!(
+                "Schema version mismatch: found {}, expected {}",
+                found,
+                crate::migration::core::ConfigVersion::current()
+            ));
+            tui::print_info("Run", &format!("clawshell migrate-config --config {path}"));
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,6 +135,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             follow,
         } => cmd_logs(level, filter, num, follow).await?,
         Commands::Config { config, edit } => cmd_config(&config, edit)?,
+        Commands::MigrateConfig {
+            config,
+            on_ambiguous,
+        } => cmd_migrate_config(&config, on_ambiguous)?,
         Commands::Onboard => cmd_onboard()?,
         Commands::Uninstall { yes } => cmd_uninstall(yes)?,
         Commands::Version => cmd_version(),
@@ -72,6 +171,7 @@ async fn cmd_start_inner(
 
     // Validate configuration
     let path = PathBuf::from(config_path);
+    ensure_config_migrated(&path)?;
     let config = Config::from_file(&path)
         .map_err(|e| format!("Failed to load configuration from '{}': {}", config_path, e))?;
 
@@ -126,7 +226,7 @@ async fn cmd_start_inner(
 
     info!(
         listen = config.listen_addr(),
-        upstream = config.upstream.base_url,
+        upstream = config.upstream.openai_base_url,
         keys = config.keys.len(),
         "ClawShell starting"
     );
@@ -164,6 +264,7 @@ async fn cmd_start_inner(
 
 fn cmd_stop() -> Result<(), Box<dyn std::error::Error>> {
     tui::print_banner("Stop");
+    ensure_default_config_migrated_if_present()?;
 
     match process::read_pid_file() {
         Some(pid) => {
@@ -213,6 +314,7 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn cmd_restart(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     tui::print_banner("Restart");
+    ensure_config_migrated(&PathBuf::from(config_path))?;
 
     // Stop if running
     if let Some(pid) = process::read_pid_file() {
@@ -325,6 +427,13 @@ fn cmd_config(config_path: &str, edit: bool) -> Result<(), Box<dyn std::error::E
     let path = PathBuf::from(config_path);
 
     if edit {
+        if !path.exists() {
+            tui::print_error(&format!("Configuration file not found: {config_path}"));
+            std::process::exit(1);
+        }
+
+        ensure_config_migrated(&path)?;
+
         // Open in editor
         let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
 
@@ -375,18 +484,26 @@ fn cmd_config(config_path: &str, edit: bool) -> Result<(), Box<dyn std::error::E
     }
 
     let content = std::fs::read_to_string(&path)?;
+    let version_status = clawshell_toml::version_gate_status(&path);
 
     // Validate
     match Config::from_file(&path) {
         Ok(config) => {
             tui::print_info("File", config_path);
             tui::print_success("Status: Valid");
+            match &version_status {
+                Ok(status) => print_migration_status(config_path, status),
+                Err(e) => tui::print_warning(&format!(
+                    "Could not determine migration status from version field: {}",
+                    e
+                )),
+            }
             println!();
 
             tui::print_section("Server");
             tui::print_info("Listen", &config.listen_addr());
             tui::print_info("Log level", &config.log_level);
-            tui::print_info("Upstream (OpenAI)", &config.upstream.base_url);
+            tui::print_info("Upstream (OpenAI)", &config.upstream.openai_base_url);
             tui::print_info(
                 "Upstream (Anthropic)",
                 config
@@ -429,12 +546,64 @@ fn cmd_config(config_path: &str, edit: bool) -> Result<(), Box<dyn std::error::E
         Err(e) => {
             tui::print_info("File", config_path);
             tui::print_error(&format!("Status: INVALID - {e}"));
+            if let Ok(status) = &version_status {
+                print_migration_status(config_path, status);
+            }
             println!();
             tui::print_section("Raw content");
             println!("{}", content);
         }
     }
 
+    Ok(())
+}
+
+fn cmd_migrate_config(
+    config_path: &str,
+    on_ambiguous: Option<OnAmbiguousOption>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tui::print_banner("Migrate Config");
+
+    let path = PathBuf::from(config_path);
+    if !path.exists() {
+        tui::print_error(&format!("Configuration file not found: {}", path.display()));
+        std::process::exit(1);
+    }
+
+    let targets: Vec<Box<dyn MigrationTarget>> = vec![Box::new(ClawshellTomlTarget::new(path))];
+    let mut resolver: Box<dyn AmbiguityResolver> = match on_ambiguous {
+        Some(OnAmbiguousOption::Fail) => Box::new(FailOnAmbiguousResolver),
+        None => Box::new(InteractiveAmbiguityResolver),
+    };
+
+    let report = orchestrator::migrate_targets(&targets, resolver.as_mut())?;
+    tui::print_info("Target version", &report.to_version.to_string());
+
+    for target in report.targets {
+        println!();
+        tui::print_section(&format!("Target: {}", target.target_name));
+        tui::print_info("File", &target.path.display().to_string());
+        tui::print_info("From", &target.from_version.to_string());
+        tui::print_info("To", &target.to_version.to_string());
+        if target.changed {
+            tui::print_success("Migration applied.");
+            if let Some(backup) = target.backup_path {
+                tui::print_info("Backup", &backup.display().to_string());
+            }
+        } else {
+            tui::print_success("Already up to date.");
+        }
+
+        for step in target.applied_steps {
+            tui::print_info("Step", &step);
+        }
+        for warning in target.warnings {
+            tui::print_warning(&warning);
+        }
+    }
+
+    println!();
+    tui::print_success("Migration completed.");
     Ok(())
 }
 
@@ -459,6 +628,11 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
             ],
         );
         std::process::exit(1);
+    }
+
+    let existing_config = process::default_config_path();
+    if existing_config.exists() {
+        ensure_config_migrated(&existing_config)?;
     }
 
     tui::print_warning("Administrative privileges in use — securing sensitive files.");
@@ -843,6 +1017,8 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         );
         std::process::exit(1);
     }
+
+    ensure_default_config_migrated_if_present()?;
 
     tui::print_warning("Administrative privileges in use — removing secured files safely.");
     println!();

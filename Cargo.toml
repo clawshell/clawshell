@@ -37,6 +37,7 @@ wiremock = "0.6"
 insta = { version = "1", features = ["yaml"] }
 assert_cmd = "2"
 predicates = "3"
+tempfile = "3"
 
 [[bin]]
 name = "clawshell"

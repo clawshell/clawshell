@@ -1,4 +1,4 @@
 [server]
 
 [upstream]
-base_url = ""
+openai_base_url = ""
