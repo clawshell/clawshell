@@ -4,6 +4,7 @@ use crate::tui;
 use serde_json::Value;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use tracing::warn;
 use vfs::VfsPath;
 
 /// API keys detected from an existing OpenClaw installation.
@@ -660,11 +661,14 @@ pub fn backup_openclaw_config(openclaw_path: &Path) -> Result<PathBuf, Box<dyn s
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&backup_path, std::fs::Permissions::from_mode(0o000))?;
 
-    // Chown the backup to the clawshell user
-    let chown_spec = platform::clawshell_chown_spec();
-    let _ = std::process::Command::new("chown")
-        .args([chown_spec, &backup_path.to_string_lossy()])
-        .status();
+    // Chown the backup to the clawshell user.
+    if let Err(error) = platform::set_owner(&backup_path, false) {
+        warn!(
+            error = %error,
+            path = %backup_path.display(),
+            "Failed to set backup owner"
+        );
+    }
 
     Ok(backup_path)
 }
@@ -896,6 +900,19 @@ pub fn install_autostart_service(
     let service_path = autostart_service_path();
     let root = crate::process::physical_root();
     let vfs_path = root.join(service_path.trim_start_matches('/'))?;
+
+    // Reinstall path: try to unload/disable first so replacing the unit is safe.
+    // Whether this should be best-effort is a caller policy, not a platform policy.
+    if vfs_path.exists()?
+        && let Err(error) = platform::remove_autostart_service(service_path)
+    {
+        warn!(
+            error = %error,
+            service_path,
+            "Failed to stop existing auto-start service before reinstall"
+        );
+    }
+
     install_autostart_service_vfs(&vfs_path, &content)?;
     platform::install_autostart_post_write(service_path)?;
 

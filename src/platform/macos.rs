@@ -1,6 +1,6 @@
-use super::{Error, command_output, command_status, ensure_success};
+use super::{Error, command_output, command_status, format_octal_mode};
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::Command;
 
 pub fn clawshell_chown_spec() -> &'static str {
     "clawshell:staff"
@@ -22,7 +22,7 @@ pub fn autostart_service_content(exe_path: &Path, config_path: &Path) -> String 
     crate::onboard::generate_launchd_plist(exe_path, config_path)
 }
 
-pub fn create_system_user(name: &str) -> Result<ExitStatus, Error> {
+pub fn create_system_user(name: &str) -> Result<(), Error> {
     let mut list_users = Command::new("dscl");
     list_users.args([".", "-list", "/Users", "UniqueID"]);
     let output = command_output(&mut list_users, "dscl -list /Users UniqueID")?;
@@ -39,66 +39,55 @@ pub fn create_system_user(name: &str) -> Result<ExitStatus, Error> {
     let user_path = format!("/Users/{name}");
     let uid_str = uid.to_string();
 
-    let dscl = |args: &[&str], desc: &str| -> Result<ExitStatus, Error> {
+    let dscl = |args: &[&str], command_name: &'static str| -> Result<(), Error> {
         let mut command = Command::new("dscl");
         command.args(args);
-        let status = command_status(&mut command, "dscl")?;
-        if !status.success() {
-            eprintln!("Warning: failed to {desc} for '{name}'");
-        }
-        Ok(status)
+        command_status(&mut command, command_name)
     };
 
-    dscl(&[".", "-create", &user_path], "create user record")?;
+    dscl(&[".", "-create", &user_path], "dscl create user record")?;
     dscl(
         &[".", "-create", &user_path, "UniqueID", &uid_str],
-        "set UID",
+        "dscl set user UID",
     )?;
     dscl(
         &[".", "-create", &user_path, "PrimaryGroupID", "20"],
-        "set GID",
+        "dscl set user GID",
     )?;
     dscl(
         &[".", "-create", &user_path, "UserShell", "/usr/bin/false"],
-        "set shell",
+        "dscl set user shell",
     )?;
     dscl(
         &[".", "-create", &user_path, "RealName", "ClawShell Service"],
-        "set real name",
+        "dscl set user real name",
     )?;
-    let status = dscl(
+    dscl(
         &[".", "-create", &user_path, "NFSHomeDirectory", "/var/empty"],
-        "set home directory",
+        "dscl set user home directory",
     )?;
 
     let mut hide_user = Command::new("dscl");
     hide_user.args([".", "-create", &user_path, "IsHidden", "1"]);
-    let _ = command_status(&mut hide_user, "dscl");
+    command_status(&mut hide_user, "dscl hide user")?;
 
-    Ok(status)
+    Ok(())
 }
 
-pub fn delete_system_user(name: &str) -> Result<ExitStatus, Error> {
+pub fn delete_system_user(name: &str) -> Result<(), Error> {
     let mut command = Command::new("dscl");
     command.args([".", "-delete", &format!("/Users/{name}")]);
     command_status(&mut command, "dscl -delete /Users")
 }
 
 pub fn install_autostart_post_write(service_path: &str) -> Result<(), Error> {
-    let mut unload = Command::new("launchctl");
-    unload
-        .args(["unload", service_path])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let _ = command_status(&mut unload, "launchctl unload");
-
     let mut chown = Command::new("chown");
     chown.args(["root:wheel", service_path]);
-    let _ = command_status(&mut chown, "chown");
+    command_status(&mut chown, "chown")?;
 
     let mut chmod = Command::new("chmod");
     chmod.args(["0644", service_path]);
-    let _ = command_status(&mut chmod, "chmod");
+    command_status(&mut chmod, "chmod")?;
 
     Ok(())
 }
@@ -106,21 +95,36 @@ pub fn install_autostart_post_write(service_path: &str) -> Result<(), Error> {
 pub fn start_autostart_service(service_path: &str) -> Result<(), Error> {
     let mut load = Command::new("launchctl");
     load.args(["load", service_path]);
-    let output = command_output(&mut load, "launchctl load")?;
-    ensure_success("launchctl load", output)?;
+    command_status(&mut load, "launchctl load")?;
     Ok(())
 }
 
 pub fn remove_autostart_service(service_path: &str) -> Result<(), Error> {
     let mut unload = Command::new("launchctl");
-    unload
-        .args(["unload", service_path])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let _ = command_status(&mut unload, "launchctl unload");
+    unload.args(["unload", service_path]);
+    command_status(&mut unload, "launchctl unload")?;
     Ok(())
 }
 
 pub fn remove_autostart_post_delete() -> Result<(), Error> {
     Ok(())
+}
+
+pub fn set_owner(path: &Path, recursive: bool) -> Result<(), Error> {
+    let mut command = Command::new("chown");
+    if recursive {
+        command.arg("-R");
+    }
+    let path_arg = path.to_string_lossy().into_owned();
+    command.args([clawshell_chown_spec(), path_arg.as_str()]);
+    let op = if recursive { "chown -R" } else { "chown" };
+    command_status(&mut command, op)
+}
+
+pub fn set_mode(path: &Path, mode_bits: u32) -> Result<(), Error> {
+    let mode_str = format_octal_mode(mode_bits);
+    let path_arg = path.to_string_lossy().into_owned();
+    let mut command = Command::new("chmod");
+    command.args([mode_str.as_str(), path_arg.as_str()]);
+    command_status(&mut command, "chmod")
 }

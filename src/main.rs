@@ -466,9 +466,8 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     if user_exists {
         tui::print_step_done(1, TOTAL_STEPS, "System user already exists");
     } else {
-        let status = platform::create_system_user("clawshell")?;
-        if !status.success() {
-            tui::print_error("Failed to create 'clawshell' user.");
+        if let Err(error) = platform::create_system_user("clawshell") {
+            tui::print_error(&format!("Failed to create 'clawshell' user: {error}"));
             std::process::exit(1);
         }
         tui::print_step_done(1, TOTAL_STEPS, "System user created");
@@ -493,32 +492,35 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     // Step 3: Set permissions and ownership
     tui::print_step(3, TOTAL_STEPS, "Setting permissions and ownership...");
 
-    let chown_spec = platform::clawshell_chown_spec();
-
-    if let Err(e) = std::process::Command::new("chmod")
-        .args(["0700", &config_dir.to_string_lossy()])
-        .status()
-    {
-        warn!(path = %config_dir.display(), error = %e, "Failed to chmod config directory");
+    if let Err(error) = platform::set_mode(&config_dir, 0o700) {
+        warn!(
+            error = %error,
+            path = %config_dir.display(),
+            "Failed to set config directory permissions"
+        );
     }
-    if let Err(e) = std::process::Command::new("chown")
-        .args(["-R", chown_spec, &config_dir.to_string_lossy()])
-        .status()
-    {
-        warn!(path = %config_dir.display(), error = %e, "Failed to chown config directory");
+    if let Err(error) = platform::set_owner(&config_dir, true) {
+        warn!(
+            error = %error,
+            path = %config_dir.display(),
+            "Failed to set config directory owner"
+        );
     }
-    if let Err(e) = std::process::Command::new("chown")
-        .args(["-R", chown_spec, &log_dir_path.to_string_lossy()])
-        .status()
-    {
-        warn!(path = %log_dir_path.display(), error = %e, "Failed to chown log directory");
+    if let Err(error) = platform::set_owner(&log_dir_path, true) {
+        warn!(
+            error = %error,
+            path = %log_dir_path.display(),
+            "Failed to set log directory owner"
+        );
     }
-    if let Some(pid_parent) = pid_path.parent()
-        && let Err(e) = std::process::Command::new("chown")
-            .args([chown_spec, &pid_parent.to_string_lossy()])
-            .status()
-    {
-        warn!(path = %pid_parent.display(), error = %e, "Failed to chown PID directory");
+    if let Some(pid_parent) = pid_path.parent() {
+        if let Err(error) = platform::set_owner(pid_parent, false) {
+            warn!(
+                error = %error,
+                path = %pid_parent.display(),
+                "Failed to set PID directory owner"
+            );
+        }
     }
     tui::print_step_done(3, TOTAL_STEPS, "Permissions set");
 
@@ -548,18 +550,34 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&config_file, serde_json::to_string_pretty(&config_json)?)?;
 
     // Set permissions on config files
-    let _ = std::process::Command::new("chmod")
-        .args(["0600", &config_file.to_string_lossy()])
-        .status();
-    let _ = std::process::Command::new("chmod")
-        .args(["0600", &toml_config_path.to_string_lossy()])
-        .status();
-    let _ = std::process::Command::new("chown")
-        .args([chown_spec, &config_file.to_string_lossy()])
-        .status();
-    let _ = std::process::Command::new("chown")
-        .args([chown_spec, &toml_config_path.to_string_lossy()])
-        .status();
+    if let Err(error) = platform::set_mode(&config_file, 0o600) {
+        warn!(
+            error = %error,
+            path = %config_file.display(),
+            "Failed to set config.json permissions"
+        );
+    }
+    if let Err(error) = platform::set_mode(&toml_config_path, 0o600) {
+        warn!(
+            error = %error,
+            path = %toml_config_path.display(),
+            "Failed to set clawshell.toml permissions"
+        );
+    }
+    if let Err(error) = platform::set_owner(&config_file, false) {
+        warn!(
+            error = %error,
+            path = %config_file.display(),
+            "Failed to set config.json owner"
+        );
+    }
+    if let Err(error) = platform::set_owner(&toml_config_path, false) {
+        warn!(
+            error = %error,
+            path = %toml_config_path.display(),
+            "Failed to set clawshell.toml owner"
+        );
+    }
     tui::print_step_done(5, TOTAL_STEPS, "Configuration written");
 
     // Step 6: OpenClaw config path was already asked in step 4
@@ -938,11 +956,10 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(false);
 
     if user_exists {
-        let status = platform::delete_system_user("clawshell")?;
-        if status.success() {
-            tui::print_success("System user removed.");
+        if let Err(error) = platform::delete_system_user("clawshell") {
+            tui::print_warning(&format!("Failed to remove system user: {error}"));
         } else {
-            tui::print_warning(&format!("Failed to remove user (exit code: {status})."));
+            tui::print_success("System user removed.");
         }
     }
 

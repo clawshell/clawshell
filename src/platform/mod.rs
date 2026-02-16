@@ -32,13 +32,6 @@ pub enum Error {
     NoAvailableSystemUid,
 }
 
-fn command_status(command: &mut Command, command_name: &'static str) -> Result<ExitStatus, Error> {
-    command.status().map_err(|source| Error::CommandIo {
-        command: command_name,
-        source,
-    })
-}
-
 fn command_output(
     command: &mut Command,
     command_name: &'static str,
@@ -49,7 +42,8 @@ fn command_output(
     })
 }
 
-fn ensure_success(command_name: &'static str, output: std::process::Output) -> Result<(), Error> {
+fn command_status(command: &mut Command, command_name: &'static str) -> Result<(), Error> {
+    let output = command_output(command, command_name)?;
     if output.status.success() {
         Ok(())
     } else {
@@ -60,4 +54,8 @@ fn ensure_success(command_name: &'static str, output: std::process::Output) -> R
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
     }
+}
+
+fn format_octal_mode(mode_bits: u32) -> String {
+    format!("{:04o}", mode_bits)
 }
