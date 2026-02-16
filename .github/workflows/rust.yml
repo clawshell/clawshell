@@ -56,8 +56,10 @@ jobs:
       run: cargo test --verbose
 
     - name: Install cargo-tarpaulin@${{ env.TARPAULIN_VERSION }}
+      uses: taiki-e/install-action@f8d25fb8a2df08dcd3cead89780d572767b8655f # v2.68.0
       if: matrix.os == 'ubuntu-latest'
-      run: cargo install cargo-tarpaulin@${{ env.TARPAULIN_VERSION }} --locked
+      with:
+        tool: cargo-tarpaulin@${{ env.TARPAULIN_VERSION }}
 
     - name: Run tarpaulin
       if: matrix.os == 'ubuntu-latest'
@@ -71,11 +73,15 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install cargo-udeps
-      run: cargo install cargo-udeps@${{ env.UDEPS_VERSION }} --locked
+    - name: Install cargo-udeps@${{ env.UDEPS_VERSION }}
+      uses: taiki-e/install-action@f8d25fb8a2df08dcd3cead89780d572767b8655f # v2.68.0
+      with:
+        tool: cargo-udeps@${{ env.UDEPS_VERSION }}
 
-    - name: Install cargo-audit
-      run: cargo install cargo-audit@${{ env.AUDIT_VERSION }} --locked
+    - name: Install cargo-audit@${{ env.AUDIT_VERSION }}
+      uses: taiki-e/install-action@f8d25fb8a2df08dcd3cead89780d572767b8655f # v2.68.0
+      with:
+        tool: cargo-audit@${{ env.AUDIT_VERSION }}
 
     - name: Run cargo udeps
       run: cargo +nightly udeps --verbose
