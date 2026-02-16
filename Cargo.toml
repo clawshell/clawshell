@@ -1,6 +1,6 @@
 [package]
 name = "clawshell"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 license-file = "LICENSE"
 homepage = "https://github.com/clawshell/clawshell"
