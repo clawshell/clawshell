@@ -38,5 +38,9 @@ insta = { version = "1", features = ["yaml"] }
 assert_cmd = "2"
 predicates = "3"
 
+[[bin]]
+name = "clawshell"
+path = "src/main.rs"
+
 [lints.clippy]
 collapsible_if = "allow"
