@@ -905,7 +905,8 @@ pub fn install_autostart_service(
 /// Start the auto-start service via the platform service manager.
 pub fn start_autostart_service() -> Result<(), Box<dyn std::error::Error>> {
     let service_path = autostart_service_path();
-    platform::start_autostart_service(service_path)
+    platform::start_autostart_service(service_path)?;
+    Ok(())
 }
 
 /// Remove the auto-start service from the real filesystem and disable it.

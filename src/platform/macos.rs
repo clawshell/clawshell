@@ -1,3 +1,4 @@
+use super::{Error, command_output, command_status, ensure_success};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 
@@ -21,10 +22,10 @@ pub fn autostart_service_content(exe_path: &Path, config_path: &Path) -> String 
     crate::onboard::generate_launchd_plist(exe_path, config_path)
 }
 
-pub fn create_system_user(name: &str) -> Result<ExitStatus, Box<dyn std::error::Error>> {
-    let output = Command::new("dscl")
-        .args([".", "-list", "/Users", "UniqueID"])
-        .output()?;
+pub fn create_system_user(name: &str) -> Result<ExitStatus, Error> {
+    let mut list_users = Command::new("dscl");
+    list_users.args([".", "-list", "/Users", "UniqueID"]);
+    let output = command_output(&mut list_users, "dscl -list /Users UniqueID")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let used_uids: Vec<u32> = stdout
         .lines()
@@ -33,13 +34,15 @@ pub fn create_system_user(name: &str) -> Result<ExitStatus, Box<dyn std::error::
     let uid = (400..500)
         .rev()
         .find(|u| !used_uids.contains(u))
-        .ok_or("No available system UID in 400-499 range")?;
+        .ok_or(Error::NoAvailableSystemUid)?;
 
     let user_path = format!("/Users/{name}");
     let uid_str = uid.to_string();
 
-    let dscl = |args: &[&str], desc: &str| -> Result<ExitStatus, Box<dyn std::error::Error>> {
-        let status = Command::new("dscl").args(args).status()?;
+    let dscl = |args: &[&str], desc: &str| -> Result<ExitStatus, Error> {
+        let mut command = Command::new("dscl");
+        command.args(args);
+        let status = command_status(&mut command, "dscl")?;
         if !status.success() {
             eprintln!("Warning: failed to {desc} for '{name}'");
         }
@@ -68,51 +71,56 @@ pub fn create_system_user(name: &str) -> Result<ExitStatus, Box<dyn std::error::
         "set home directory",
     )?;
 
-    let _ = Command::new("dscl")
-        .args([".", "-create", &user_path, "IsHidden", "1"])
-        .status();
+    let mut hide_user = Command::new("dscl");
+    hide_user.args([".", "-create", &user_path, "IsHidden", "1"]);
+    let _ = command_status(&mut hide_user, "dscl");
 
     Ok(status)
 }
 
-pub fn delete_system_user(name: &str) -> Result<ExitStatus, Box<dyn std::error::Error>> {
-    Ok(Command::new("dscl")
-        .args([".", "-delete", &format!("/Users/{name}")])
-        .status()?)
+pub fn delete_system_user(name: &str) -> Result<ExitStatus, Error> {
+    let mut command = Command::new("dscl");
+    command.args([".", "-delete", &format!("/Users/{name}")]);
+    command_status(&mut command, "dscl -delete /Users")
 }
 
-pub fn install_autostart_post_write(service_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = Command::new("launchctl")
+pub fn install_autostart_post_write(service_path: &str) -> Result<(), Error> {
+    let mut unload = Command::new("launchctl");
+    unload
         .args(["unload", service_path])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let _ = Command::new("chown")
-        .args(["root:wheel", service_path])
-        .status();
-    let _ = Command::new("chmod").args(["0644", service_path]).status();
+        .stderr(Stdio::null());
+    let _ = command_status(&mut unload, "launchctl unload");
+
+    let mut chown = Command::new("chown");
+    chown.args(["root:wheel", service_path]);
+    let _ = command_status(&mut chown, "chown");
+
+    let mut chmod = Command::new("chmod");
+    chmod.args(["0644", service_path]);
+    let _ = command_status(&mut chmod, "chmod");
+
     Ok(())
 }
 
-pub fn start_autostart_service(service_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("launchctl")
-        .args(["load", service_path])
-        .status()?;
-    if !status.success() {
-        return Err(format!("launchctl load failed (exit code {})", status).into());
-    }
+pub fn start_autostart_service(service_path: &str) -> Result<(), Error> {
+    let mut load = Command::new("launchctl");
+    load.args(["load", service_path]);
+    let output = command_output(&mut load, "launchctl load")?;
+    ensure_success("launchctl load", output)?;
     Ok(())
 }
 
-pub fn remove_autostart_service(service_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = Command::new("launchctl")
+pub fn remove_autostart_service(service_path: &str) -> Result<(), Error> {
+    let mut unload = Command::new("launchctl");
+    unload
         .args(["unload", service_path])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .stderr(Stdio::null());
+    let _ = command_status(&mut unload, "launchctl unload");
     Ok(())
 }
 
-pub fn remove_autostart_post_delete() -> Result<(), Box<dyn std::error::Error>> {
+pub fn remove_autostart_post_delete() -> Result<(), Error> {
     Ok(())
 }

@@ -28,6 +28,7 @@ nix = { version = "0.31.1", features = ["signal", "process", "feature", "user"] 
 inquire = "0.9.3"
 console = "0.16.2"
 vfs = "0.12"
+thiserror = "2"
 
 [dev-dependencies]
 tokio = { version = "1.49", features = ["full", "test-util"] }

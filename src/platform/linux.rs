@@ -1,3 +1,4 @@
+use super::{Error, command_output, command_status, ensure_success};
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 
@@ -21,49 +22,47 @@ pub fn autostart_service_content(exe_path: &Path, config_path: &Path) -> String 
     crate::onboard::generate_systemd_unit(exe_path, config_path)
 }
 
-pub fn create_system_user(name: &str) -> Result<ExitStatus, Box<dyn std::error::Error>> {
-    Ok(Command::new("useradd")
-        .args([
-            "--system",
-            "--no-create-home",
-            "--shell",
-            "/usr/sbin/nologin",
-            name,
-        ])
-        .status()?)
+pub fn create_system_user(name: &str) -> Result<ExitStatus, Error> {
+    let mut command = Command::new("useradd");
+    command.args([
+        "--system",
+        "--no-create-home",
+        "--shell",
+        "/usr/sbin/nologin",
+        name,
+    ]);
+    command_status(&mut command, "useradd")
 }
 
-pub fn delete_system_user(name: &str) -> Result<ExitStatus, Box<dyn std::error::Error>> {
-    Ok(Command::new("userdel").arg(name).status()?)
+pub fn delete_system_user(name: &str) -> Result<ExitStatus, Error> {
+    let mut command = Command::new("userdel");
+    command.arg(name);
+    command_status(&mut command, "userdel")
 }
 
-pub fn install_autostart_post_write(_service_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("systemctl").args(["daemon-reload"]).status()?;
-    if !status.success() {
-        return Err("systemctl daemon-reload failed".into());
-    }
+pub fn install_autostart_post_write(_service_path: &str) -> Result<(), Error> {
+    let mut daemon_reload = Command::new("systemctl");
+    daemon_reload.args(["daemon-reload"]);
+    let output = command_output(&mut daemon_reload, "systemctl daemon-reload")?;
+    ensure_success("systemctl daemon-reload", output)?;
 
-    let status = Command::new("systemctl")
-        .args(["enable", "clawshell.service"])
-        .status()?;
-    if !status.success() {
-        return Err("systemctl enable failed".into());
-    }
+    let mut enable = Command::new("systemctl");
+    enable.args(["enable", "clawshell.service"]);
+    let output = command_output(&mut enable, "systemctl enable clawshell.service")?;
+    ensure_success("systemctl enable clawshell.service", output)?;
 
     Ok(())
 }
 
-pub fn start_autostart_service(_service_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("systemctl")
-        .args(["start", "clawshell.service"])
-        .status()?;
-    if !status.success() {
-        return Err(format!("systemctl start failed (exit code {})", status).into());
-    }
+pub fn start_autostart_service(_service_path: &str) -> Result<(), Error> {
+    let mut start = Command::new("systemctl");
+    start.args(["start", "clawshell.service"]);
+    let output = command_output(&mut start, "systemctl start clawshell.service")?;
+    ensure_success("systemctl start clawshell.service", output)?;
     Ok(())
 }
 
-pub fn remove_autostart_service(_service_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn remove_autostart_service(_service_path: &str) -> Result<(), Error> {
     let _ = Command::new("systemctl")
         .args(["disable", "clawshell.service"])
         .status();
@@ -73,7 +72,7 @@ pub fn remove_autostart_service(_service_path: &str) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-pub fn remove_autostart_post_delete() -> Result<(), Box<dyn std::error::Error>> {
+pub fn remove_autostart_post_delete() -> Result<(), Error> {
     let _ = Command::new("systemctl").args(["daemon-reload"]).status();
     Ok(())
 }
