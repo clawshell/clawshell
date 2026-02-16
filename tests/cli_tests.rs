@@ -62,7 +62,7 @@ fn test_version_output() {
         .assert()
         .success()
         .stdout(contains("clawshell").or(contains("ClawShell").or(contains("Clawshell"))))
-        .stdout(contains("v0.0.1"))
+        .stdout(contains("v0.0.2"))
         .stdout(contains("openclaw").or(contains("OpenClaw")));
 }
 
