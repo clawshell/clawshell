@@ -18,8 +18,42 @@ pub fn autostart_service_path() -> &'static str {
     "/Library/LaunchDaemons/com.clawshell.daemon.plist"
 }
 
+pub fn generate_launchd_plist(exe_path: &Path, config_path: &Path) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.clawshell.daemon</string>
+    <key>UserName</key>
+    <string>clawshell</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>start</string>
+        <string>--config</string>
+        <string>{config}</string>
+        <string>--foreground</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/clawshell/clawshell.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/clawshell/clawshell.log</string>
+</dict>
+</plist>
+"#,
+        exe = exe_path.display(),
+        config = config_path.display(),
+    )
+}
+
 pub fn autostart_service_content(exe_path: &Path, config_path: &Path) -> String {
-    crate::onboard::generate_launchd_plist(exe_path, config_path)
+    generate_launchd_plist(exe_path, config_path)
 }
 
 pub fn create_system_user(name: &str) -> Result<(), Error> {
@@ -127,4 +161,47 @@ pub fn set_mode(path: &Path, mode_bits: u32) -> Result<(), Error> {
     let mut command = Command::new("chmod");
     command.args([mode_str.as_str(), path_arg.as_str()]);
     command_status(&mut command, "chmod")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_launchd_plist;
+    use std::path::Path;
+
+    #[test]
+    fn test_generate_launchd_plist_contains_required_fields() {
+        let content = generate_launchd_plist(
+            Path::new("/usr/local/bin/clawshell"),
+            Path::new("/etc/clawshell/clawshell.toml"),
+        );
+        assert!(content.contains("<string>com.clawshell.daemon</string>"));
+        assert!(content.contains("<string>clawshell</string>"));
+        assert!(content.contains("<key>KeepAlive</key>"));
+        assert!(content.contains("<true/>"));
+        assert!(content.contains("<key>RunAtLoad</key>"));
+        assert!(content.contains("<string>/usr/local/bin/clawshell</string>"));
+        assert!(content.contains("<string>/var/log/clawshell/clawshell.log</string>"));
+        assert!(content.contains("<key>ProgramArguments</key>"));
+    }
+
+    #[test]
+    fn test_generate_launchd_plist_custom_paths() {
+        let content = generate_launchd_plist(
+            Path::new("/opt/cs/bin/clawshell"),
+            Path::new("/opt/cs/config.toml"),
+        );
+        assert!(content.contains("<string>/opt/cs/bin/clawshell</string>"));
+        assert!(content.contains("<string>/opt/cs/config.toml</string>"));
+    }
+
+    #[test]
+    fn test_generate_launchd_plist_valid_xml_structure() {
+        let content = generate_launchd_plist(
+            Path::new("/usr/local/bin/clawshell"),
+            Path::new("/etc/clawshell/clawshell.toml"),
+        );
+        assert!(content.starts_with("<?xml version=\"1.0\""));
+        assert!(content.contains("<!DOCTYPE plist"));
+        assert!(content.contains("</plist>"));
+    }
 }

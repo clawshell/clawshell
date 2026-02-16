@@ -18,8 +18,33 @@ pub fn autostart_service_path() -> &'static str {
     "/etc/systemd/system/clawshell.service"
 }
 
+pub fn generate_systemd_unit(exe_path: &Path, config_path: &Path) -> String {
+    format!(
+        r#"[Unit]
+Description=ClawShell API proxy daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=clawshell
+Group=clawshell
+ExecStart={exe} start --config {config} --foreground
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/clawshell/clawshell.log
+StandardError=append:/var/log/clawshell/clawshell.log
+
+[Install]
+WantedBy=multi-user.target
+"#,
+        exe = exe_path.display(),
+        config = config_path.display(),
+    )
+}
+
 pub fn autostart_service_content(exe_path: &Path, config_path: &Path) -> String {
-    crate::onboard::generate_systemd_unit(exe_path, config_path)
+    generate_systemd_unit(exe_path, config_path)
 }
 
 pub fn create_system_user(name: &str) -> Result<(), Error> {
@@ -95,4 +120,39 @@ pub fn set_mode(path: &Path, mode_bits: u32) -> Result<(), Error> {
     let mut command = Command::new("chmod");
     command.args([mode_str.as_str(), path_arg.as_str()]);
     command_status(&mut command, "chmod")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_systemd_unit;
+    use std::path::Path;
+
+    #[test]
+    fn test_generate_systemd_unit_contains_required_fields() {
+        let content = generate_systemd_unit(
+            Path::new("/usr/local/bin/clawshell"),
+            Path::new("/etc/clawshell/clawshell.toml"),
+        );
+        assert!(content.contains("Type=exec"));
+        assert!(content.contains("User=clawshell"));
+        assert!(content.contains("Group=clawshell"));
+        assert!(content.contains("ExecStart=/usr/local/bin/clawshell start --config /etc/clawshell/clawshell.toml --foreground"));
+        assert!(content.contains("Restart=on-failure"));
+        assert!(content.contains("RestartSec=5"));
+        assert!(content.contains("After=network-online.target"));
+        assert!(content.contains("WantedBy=multi-user.target"));
+        assert!(content.contains("StandardOutput=append:/var/log/clawshell/clawshell.log"));
+        assert!(content.contains("StandardError=append:/var/log/clawshell/clawshell.log"));
+    }
+
+    #[test]
+    fn test_generate_systemd_unit_custom_paths() {
+        let content = generate_systemd_unit(
+            Path::new("/opt/clawshell/bin/cs"),
+            Path::new("/opt/clawshell/config.toml"),
+        );
+        assert!(content.contains(
+            "ExecStart=/opt/clawshell/bin/cs start --config /opt/clawshell/config.toml --foreground"
+        ));
+    }
 }
