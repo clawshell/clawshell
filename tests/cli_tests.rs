@@ -7,12 +7,18 @@ fn cmd() -> Command {
     cargo_bin_cmd!("clawshell")
 }
 
+#[cfg(target_os = "linux")]
 fn pid_file_path() -> std::path::PathBuf {
-    clawshell::process::pid_file_path()
+    "/run/clawshell/clawshell.pid".into()
+}
+
+#[cfg(target_os = "macos")]
+fn pid_file_path() -> std::path::PathBuf {
+    "/var/run/clawshell.pid".into()
 }
 
 fn log_file_path() -> std::path::PathBuf {
-    clawshell::process::log_file_path()
+    "/var/log/clawshell/clawshell.log".into()
 }
 
 /// Try to ensure the log directory exists so tests can write log files.

@@ -48,10 +48,6 @@ pub fn theme_bold() -> Style {
     Style::new().color256(208).bold()
 }
 
-pub fn dim_style() -> Style {
-    Style::new().dim()
-}
-
 pub fn success_style() -> Style {
     Style::new().green().bold()
 }
@@ -77,13 +73,6 @@ pub fn print_banner(subtitle: &str) {
     if !subtitle.is_empty() {
         println!("      {}", bold.apply_to(format!("── {subtitle} ──")));
     }
-    println!();
-}
-
-pub fn print_header(title: &str) {
-    let style = theme_bold();
-    println!();
-    println!("  {}", style.apply_to(format!("══ {title} ══")));
     println!();
 }
 
@@ -280,12 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn test_dim_style() {
-        let style = dim_style();
-        let _ = style.apply_to("dim");
-    }
-
-    #[test]
     fn test_print_banner_does_not_panic() {
         print_banner("Onboarding");
     }
@@ -293,11 +276,6 @@ mod tests {
     #[test]
     fn test_print_banner_empty_subtitle() {
         print_banner("");
-    }
-
-    #[test]
-    fn test_print_header_does_not_panic() {
-        print_header("Test Header");
     }
 
     #[test]

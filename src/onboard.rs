@@ -2,7 +2,6 @@ use crate::platform;
 use crate::tui;
 
 use serde_json::Value;
-use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 use vfs::VfsPath;
@@ -190,152 +189,6 @@ pub struct OnboardConfig {
     pub openclaw_config_path: PathBuf,
     pub server_host: String,
     pub server_port: u16,
-}
-
-/// Prompt the user for input with a message. Returns trimmed input.
-pub fn prompt(reader: &mut dyn BufRead, writer: &mut dyn Write, msg: &str) -> io::Result<String> {
-    write!(writer, "{}", msg)?;
-    writer.flush()?;
-    let mut input = String::new();
-    reader.read_line(&mut input)?;
-    Ok(input.trim().to_string())
-}
-
-/// Prompt the user with a default value. Empty input returns the default.
-pub fn prompt_with_default(
-    reader: &mut dyn BufRead,
-    writer: &mut dyn Write,
-    msg: &str,
-    default: &str,
-) -> io::Result<String> {
-    write!(writer, "{} [{}]: ", msg, default)?;
-    writer.flush()?;
-    let mut input = String::new();
-    reader.read_line(&mut input)?;
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        Ok(default.to_string())
-    } else {
-        Ok(trimmed.to_string())
-    }
-}
-
-/// Prompt the user to choose a provider (openai or anthropic).
-pub fn prompt_provider(reader: &mut dyn BufRead, writer: &mut dyn Write) -> io::Result<String> {
-    writeln!(writer, "Select a model provider:")?;
-    writeln!(writer, "  1) OpenAI")?;
-    writeln!(writer, "  2) Anthropic")?;
-    let choice = prompt(reader, writer, "Enter choice (1 or 2): ")?;
-    match choice.as_str() {
-        "1" | "openai" | "OpenAI" => Ok("openai".to_string()),
-        "2" | "anthropic" | "Anthropic" => Ok("anthropic".to_string()),
-        _ => {
-            writeln!(
-                writer,
-                "Invalid choice '{}', defaulting to 'openai'.",
-                choice
-            )?;
-            Ok("openai".to_string())
-        }
-    }
-}
-
-/// Collect all onboarding information from the user interactively.
-pub fn collect_onboard_config(
-    reader: &mut dyn BufRead,
-    writer: &mut dyn Write,
-) -> io::Result<OnboardConfig> {
-    collect_onboard_config_with_detected(reader, writer, detect_openclaw_api_keys())
-}
-
-fn collect_onboard_config_with_detected(
-    reader: &mut dyn BufRead,
-    writer: &mut dyn Write,
-    detected: DetectedKeys,
-) -> io::Result<OnboardConfig> {
-    writeln!(writer)?;
-    writeln!(writer, "--- API Configuration ---")?;
-    writeln!(writer)?;
-
-    // Provider
-    let provider = prompt_provider(reader, writer)?;
-
-    // Model
-    let default_model = if provider == "anthropic" {
-        "claude-sonnet-4-5-20250929"
-    } else {
-        "gpt-5.2-chat-latest"
-    };
-    let model = prompt_with_default(reader, writer, "Enter the model name", default_model)?;
-
-    // Real API key — try to detect from OpenClaw installation
-    let real_api_key = if let Some(detected_key) = detected.for_provider(&provider) {
-        writeln!(
-            writer,
-            "An API key was detected from your OpenClaw config. \
-             It is strongly recommended to generate a new key from your provider, \
-             enter it here instead, and revoke the old one."
-        )?;
-        prompt_with_default(
-            reader,
-            writer,
-            "Enter the real API key for the selected provider",
-            detected_key,
-        )?
-    } else {
-        prompt(
-            reader,
-            writer,
-            "Enter the real API key for the selected provider: ",
-        )?
-    };
-    if real_api_key.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "API key cannot be empty",
-        ));
-    }
-
-    // Virtual API key
-    let default_virtual_key = format!("{{clawshell-virtual-key-{}}}", provider);
-    let virtual_api_key = prompt_with_default(
-        reader,
-        writer,
-        "Enter the virtual API key for OpenClaw",
-        &default_virtual_key,
-    )?;
-
-    writeln!(writer)?;
-    writeln!(writer, "--- OpenClaw Configuration ---")?;
-    writeln!(writer)?;
-
-    // OpenClaw config path
-    let default_openclaw_path = default_openclaw_config_path();
-    let openclaw_config_path = prompt_with_default(
-        reader,
-        writer,
-        "Enter the OpenClaw configuration file path",
-        &default_openclaw_path,
-    )?;
-
-    // Server settings
-    let server_host =
-        prompt_with_default(reader, writer, "Enter the ClawShell server IP", "127.0.0.1")?;
-    let server_port_str =
-        prompt_with_default(reader, writer, "Enter the ClawShell server port", "18790")?;
-    let server_port: u16 = server_port_str
-        .parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid port number"))?;
-
-    Ok(OnboardConfig {
-        provider,
-        model,
-        real_api_key,
-        virtual_api_key,
-        openclaw_config_path: PathBuf::from(openclaw_config_path),
-        server_host,
-        server_port,
-    })
 }
 
 /// Return the default OpenClaw config path.
@@ -794,18 +647,13 @@ fn ensure_nested_object(json: &mut Value, keys: &[&str]) {
 // Auto-start service management (systemd / launchd)
 // ---------------------------------------------------------------------------
 
-/// Path to the systemd unit file for the ClawShell service.
-pub const SYSTEMD_SERVICE_PATH: &str = "/etc/systemd/system/clawshell.service";
-
-/// Path to the launchd plist file for the ClawShell service.
-pub const LAUNCHD_PLIST_PATH: &str = "/Library/LaunchDaemons/com.clawshell.daemon.plist";
-
 /// Return the platform-appropriate service file path.
 pub fn autostart_service_path() -> &'static str {
     platform::autostart_service_path()
 }
 
 /// Generate a systemd unit file for the ClawShell daemon.
+#[cfg(any(test, target_os = "linux"))]
 pub fn generate_systemd_unit(exe_path: &Path, config_path: &Path) -> String {
     format!(
         r#"[Unit]
@@ -832,6 +680,7 @@ WantedBy=multi-user.target
 }
 
 /// Generate a launchd plist file for the ClawShell daemon.
+#[cfg(any(test, target_os = "macos"))]
 pub fn generate_launchd_plist(exe_path: &Path, config_path: &Path) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -942,7 +791,6 @@ pub fn remove_autostart_service() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
     use vfs::MemoryFS;
 
     fn test_config() -> OnboardConfig {
@@ -965,125 +813,6 @@ mod tests {
             .unwrap()
             .write_all(content.as_bytes())
             .unwrap();
-    }
-
-    #[test]
-    fn test_prompt_reads_input() {
-        let input = b"hello world\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut output = Vec::new();
-        let result = prompt(&mut reader, &mut output, "Enter: ").unwrap();
-        assert_eq!(result, "hello world");
-        assert_eq!(String::from_utf8_lossy(&output), "Enter: ");
-    }
-
-    #[test]
-    fn test_prompt_trims_whitespace() {
-        let input = b"  spaced  \n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut output = Vec::new();
-        let result = prompt(&mut reader, &mut output, "> ").unwrap();
-        assert_eq!(result, "spaced");
-    }
-
-    #[test]
-    fn test_prompt_with_default_uses_default_on_empty() {
-        let input = b"\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut output = Vec::new();
-        let result = prompt_with_default(&mut reader, &mut output, "Port", "18790").unwrap();
-        assert_eq!(result, "18790");
-    }
-
-    #[test]
-    fn test_prompt_with_default_uses_input_when_provided() {
-        let input = b"8080\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut output = Vec::new();
-        let result = prompt_with_default(&mut reader, &mut output, "Port", "18790").unwrap();
-        assert_eq!(result, "8080");
-    }
-
-    #[test]
-    fn test_prompt_provider_openai() {
-        let input = b"1\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut output = Vec::new();
-        let result = prompt_provider(&mut reader, &mut output).unwrap();
-        assert_eq!(result, "openai");
-    }
-
-    #[test]
-    fn test_prompt_provider_anthropic() {
-        let input = b"2\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut output = Vec::new();
-        let result = prompt_provider(&mut reader, &mut output).unwrap();
-        assert_eq!(result, "anthropic");
-    }
-
-    #[test]
-    fn test_prompt_provider_by_name() {
-        let input = b"anthropic\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut output = Vec::new();
-        let result = prompt_provider(&mut reader, &mut output).unwrap();
-        assert_eq!(result, "anthropic");
-    }
-
-    #[test]
-    fn test_prompt_provider_invalid_defaults_to_openai() {
-        let input = b"xyz\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut output = Vec::new();
-        let result = prompt_provider(&mut reader, &mut output).unwrap();
-        assert_eq!(result, "openai");
-    }
-
-    #[test]
-    fn test_collect_onboard_config_openai() {
-        let input = b"1\n\nsk-test-key\n\n\n\n\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut output = Vec::new();
-        let config =
-            collect_onboard_config_with_detected(&mut reader, &mut output, DetectedKeys::default())
-                .unwrap();
-        assert_eq!(config.provider, "openai");
-        assert_eq!(config.model, "gpt-5.2-chat-latest");
-        assert_eq!(config.real_api_key, "sk-test-key");
-        assert_eq!(config.virtual_api_key, "{clawshell-virtual-key-openai}");
-        assert_eq!(config.server_host, "127.0.0.1");
-        assert_eq!(config.server_port, 18790);
-    }
-
-    #[test]
-    fn test_collect_onboard_config_anthropic() {
-        let input = b"2\nclaude-opus-4-6\nsk-ant-test\nmy-virtual-key\n/custom/path.json\n192.168.1.1\n8080\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut output = Vec::new();
-        let config =
-            collect_onboard_config_with_detected(&mut reader, &mut output, DetectedKeys::default())
-                .unwrap();
-        assert_eq!(config.provider, "anthropic");
-        assert_eq!(config.model, "claude-opus-4-6");
-        assert_eq!(config.real_api_key, "sk-ant-test");
-        assert_eq!(config.virtual_api_key, "my-virtual-key");
-        assert_eq!(
-            config.openclaw_config_path,
-            PathBuf::from("/custom/path.json")
-        );
-        assert_eq!(config.server_host, "192.168.1.1");
-        assert_eq!(config.server_port, 8080);
-    }
-
-    #[test]
-    fn test_collect_onboard_config_empty_api_key_fails() {
-        let input = b"1\n\n\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut output = Vec::new();
-        let result =
-            collect_onboard_config_with_detected(&mut reader, &mut output, DetectedKeys::default());
-        assert!(result.is_err());
     }
 
     #[test]
@@ -1502,23 +1231,6 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_onboard_config_with_detected_key() {
-        // Simulate providing input where the detected key is offered as a default
-        // but the user enters a new key
-        let input = b"1\ngpt-5.2\nnew-key-123\nvk-test\n/tmp/oc.json\n127.0.0.1\n18790\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut output = Vec::new();
-        let detected = DetectedKeys {
-            openai: Some("old-detected-key".to_string()),
-            ..DetectedKeys::default()
-        };
-        let result = collect_onboard_config_with_detected(&mut reader, &mut output, detected);
-        assert!(result.is_ok());
-        let config = result.unwrap();
-        assert_eq!(config.real_api_key, "new-key-123");
-    }
-
-    #[test]
     fn test_detected_keys_for_provider() {
         let keys = DetectedKeys {
             anthropic: Some("ant-key".to_string()),
@@ -1783,21 +1495,5 @@ mod tests {
     fn test_autostart_service_path_is_absolute() {
         let path = autostart_service_path();
         assert!(path.starts_with('/'));
-    }
-
-    #[test]
-    fn test_systemd_service_path_constant() {
-        assert_eq!(
-            SYSTEMD_SERVICE_PATH,
-            "/etc/systemd/system/clawshell.service"
-        );
-    }
-
-    #[test]
-    fn test_launchd_plist_path_constant() {
-        assert_eq!(
-            LAUNCHD_PLIST_PATH,
-            "/Library/LaunchDaemons/com.clawshell.daemon.plist"
-        );
     }
 }

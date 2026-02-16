@@ -1,3 +1,18 @@
+#![deny(warnings)]
+#![deny(unsafe_code)] // why would we need unsafe code in this project?
+#![deny(missing_debug_implementations)]
+
+mod app;
+mod cli;
+mod config;
+mod dlp;
+mod keys;
+mod onboard;
+mod platform;
+mod process;
+mod proxy;
+mod tui;
+
 use clap::Parser;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
@@ -5,12 +20,9 @@ use std::path::PathBuf;
 use tokio::signal;
 use tracing::{debug, info, warn};
 
-use clawshell::cli::{Cli, Commands};
-use clawshell::config::Config;
-use clawshell::platform;
-use clawshell::process;
-use clawshell::tui;
-use clawshell::{AppState, build_router};
+use crate::app::{AppState, build_router};
+use crate::cli::{Cli, Commands};
+use crate::config::Config;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -427,7 +439,7 @@ fn cmd_config(config_path: &str, edit: bool) -> Result<(), Box<dyn std::error::E
 }
 
 fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
-    use clawshell::onboard;
+    use crate::onboard;
 
     const TOTAL_STEPS: usize = 9;
 
@@ -843,7 +855,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| PathBuf::from("/var/log/clawshell"));
     let pid_file = process::pid_file_path();
 
-    let service_path = std::path::Path::new(clawshell::onboard::autostart_service_path());
+    let service_path = std::path::Path::new(crate::onboard::autostart_service_path());
     let service_exists = service_path.exists();
 
     tui::print_warning("This will remove the following:");
@@ -882,7 +894,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
             let openclaw_content = std::fs::read_to_string(&openclaw_path)?;
 
             // Guard: reject uninstall if clawshell is the default model
-            if clawshell::onboard::is_clawshell_default_model(&openclaw_content)? {
+            if crate::onboard::is_clawshell_default_model(&openclaw_content)? {
                 tui::print_error(
                     "ClawShell model is currently set as the default model in OpenClaw.",
                 );
@@ -895,7 +907,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
 
             // Remove clawshell entries from OpenClaw config
             tui::print_info("Action", "Cleaning up OpenClaw configuration...");
-            let cleaned = clawshell::onboard::remove_openclaw_entries(&openclaw_content)?;
+            let cleaned = crate::onboard::remove_openclaw_entries(&openclaw_content)?;
             std::fs::write(&openclaw_path, cleaned)?;
             tui::print_success("OpenClaw configuration cleaned up.");
         }
@@ -904,7 +916,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Stop ClawShell and remove auto-start service
     if service_exists {
         tui::print_info("Action", "Stopping and removing auto-start service...");
-        match clawshell::onboard::remove_autostart_service() {
+        match crate::onboard::remove_autostart_service() {
             Ok(()) => tui::print_success("Auto-start service stopped and removed."),
             Err(e) => tui::print_warning(&format!("Failed to remove auto-start service: {e}")),
         }

@@ -123,6 +123,7 @@ impl Config {
         Ok(config)
     }
 
+    #[cfg(test)]
     pub fn parse(content: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let config: Config = toml::from_str(content)?;
         config.validate()?;
@@ -157,5 +158,133 @@ impl Config {
 
     pub fn listen_addr(&self) -> String {
         format!("{}:{}", self.server.host, self.server.port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Serialize;
+    use std::path::{Path, PathBuf};
+
+    #[derive(Serialize)]
+    struct ConfigSnapshot {
+        #[serde(flatten)]
+        config: Config,
+        derived: DerivedValues,
+    }
+
+    #[derive(Serialize)]
+    struct DerivedValues {
+        listen_addr: String,
+        openai_upstream_url: String,
+        anthropic_upstream_url: String,
+        key_map: BTreeMap<String, (String, Provider)>,
+    }
+
+    fn fixture_paths(root: &str) -> Result<Vec<PathBuf>, String> {
+        let mut paths = std::fs::read_dir(root)
+            .map_err(|e| format!("failed to read fixture directory '{root}': {e}"))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|e| format!("failed to read fixture entry in '{root}': {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        paths.retain(|path| path.extension().is_some_and(|ext| ext == "toml"));
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn snapshot_name(path: &Path) -> Result<String, String> {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("invalid fixture file name: {}", path.display()))?;
+        Ok(format!("config_fixtures__{stem}"))
+    }
+
+    fn assert_valid_config(path: &Path) -> Result<(), String> {
+        let config = Config::from_file(path)
+            .map_err(|e| format!("expected valid config {}: {e}", path.display()))?;
+        let snapshot = ConfigSnapshot {
+            derived: DerivedValues {
+                listen_addr: config.listen_addr(),
+                openai_upstream_url: config.upstream_url(Provider::Openai),
+                anthropic_upstream_url: config.upstream_url(Provider::Anthropic),
+                key_map: config.key_map(),
+            },
+            config,
+        };
+        let name = snapshot_name(path)?;
+        insta::with_settings!({
+            snapshot_path => "../tests/snapshots",
+            prepend_module_to_snapshot => false,
+        }, {
+            insta::assert_yaml_snapshot!(name, snapshot);
+        });
+        Ok(())
+    }
+
+    fn assert_invalid_config(path: &Path) -> Result<(), String> {
+        let err = Config::from_file(path).expect_err(&format!(
+            "expected invalid config to fail: {}",
+            path.display()
+        ));
+        let name = snapshot_name(path)?;
+        insta::with_settings!({
+            snapshot_path => "../tests/snapshots",
+            prepend_module_to_snapshot => false,
+        }, {
+            insta::assert_snapshot!(name, err.to_string());
+        });
+        Ok(())
+    }
+
+    #[test]
+    fn test_valid_config_fixtures() {
+        let paths =
+            fixture_paths("tests/fixtures/config/valid").expect("failed to load valid fixtures");
+        assert!(!paths.is_empty(), "no valid fixtures found");
+        for path in paths {
+            // do not use `.unwrap()` here because we want a pretty error message like
+            //
+            // ```
+            // thread 'config::tests::test_valid_config_fixtures' (196401) panicked at src/config.rs:250:59:
+            // expected valid config tests/fixtures/config/valid/all_fields.toml: TOML parse error at line 4, column 16
+            //   |
+            // 4 | host = "0.0.0.0
+            //   |                ^
+            // invalid basic string, expected `"`
+            // ```
+            assert_valid_config(&path).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    #[test]
+    fn test_invalid_config_fixtures() {
+        let paths = fixture_paths("tests/fixtures/config/invalid")
+            .expect("failed to load invalid fixtures");
+        assert!(!paths.is_empty(), "no invalid fixtures found");
+        for path in paths {
+            // do not use `.unwrap()` here because we want a pretty error message like
+            //
+            // ```
+            // thread 'config::tests::test_valid_config_fixtures' (196401) panicked at src/config.rs:250:59:
+            // expected valid config tests/fixtures/config/valid/all_fields.toml: TOML parse error at line 4, column 16
+            //   |
+            // 4 | host = "0.0.0.0
+            //   |                ^
+            // invalid basic string, expected `"`
+            // ```
+            assert_invalid_config(&path).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    #[test]
+    fn test_config_from_file_is_directory() {
+        let result = Config::from_file(Path::new("/tmp"));
+        assert!(result.is_err());
     }
 }

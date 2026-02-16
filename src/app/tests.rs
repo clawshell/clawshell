@@ -9,11 +9,11 @@ use tower::util::ServiceExt;
 use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use clawshell::config::{Config, DlpAction, DlpPattern, Provider};
-use clawshell::dlp::DlpScanner;
-use clawshell::keys::{KeyManager, ResolvedKey};
-use clawshell::proxy::ProxyClient;
-use clawshell::{AppState, build_router};
+use super::{AppState, build_router};
+use crate::config::{Config, DlpAction, DlpPattern, Provider};
+use crate::dlp::DlpScanner;
+use crate::keys::{KeyManager, ResolvedKey};
+use crate::proxy::ProxyClient;
 
 fn make_app(upstream_url: &str) -> axum::Router {
     let mut key_map = BTreeMap::new();
@@ -1090,14 +1090,6 @@ async fn test_redacted_body_content_length_not_stale() {
     let resp_body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
     assert_eq!(json["id"], "chatcmpl-ok");
-}
-
-// ========== Config Error & Edge-Case Tests ==========
-
-#[tokio::test]
-async fn test_config_from_file_is_directory() {
-    let result = Config::from_file(std::path::Path::new("/tmp"));
-    assert!(result.is_err());
 }
 
 // ========== New Feature Tests ==========

@@ -1,17 +1,3 @@
-#![deny(warnings)]
-#![deny(unsafe_code)] // why would we need unsafe code in this project?
-#![deny(missing_debug_implementations)]
-
-pub mod cli;
-pub mod config;
-pub mod dlp;
-pub mod keys;
-pub mod onboard;
-pub mod platform;
-pub mod process;
-pub mod proxy;
-pub mod tui;
-
 use crate::config::{Config, Provider};
 use crate::dlp::DlpScanner;
 use crate::keys::{KeyManager, ResolvedKey};
@@ -297,3 +283,6 @@ fn error_response(status: StatusCode, message: &str) -> Response {
     let body = serde_json::json!({ "error": message });
     (status, axum::Json(body)).into_response()
 }
+
+#[cfg(test)]
+mod tests;

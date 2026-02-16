@@ -28,6 +28,7 @@ pub enum Error {
         stdout: String,
         stderr: String,
     },
+    #[cfg(target_os = "macos")]
     #[error("no available system UID in 400-499 range")]
     NoAvailableSystemUid,
 }
