@@ -1,3 +1,4 @@
+use crate::platform;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::{Gid, Pid, Uid, User, getuid, setgid, setuid};
 use nix::unistd::{SysconfVar, sysconf};
@@ -23,11 +24,7 @@ pub(crate) fn physical_root() -> VfsPath {
 
 /// PID file path within a VFS root.
 fn pid_file_vfs(root: &VfsPath) -> Result<VfsPath, Box<dyn std::error::Error>> {
-    if cfg!(target_os = "macos") {
-        Ok(root.join("var/run/clawshell.pid")?)
-    } else {
-        Ok(root.join("run/clawshell/clawshell.pid")?)
-    }
+    Ok(root.join(platform::pid_file_vfs_rel_path())?)
 }
 
 /// Log file path within a VFS root.
@@ -39,11 +36,7 @@ fn log_file_vfs(root: &VfsPath) -> Result<VfsPath, Box<dyn std::error::Error>> {
 /// - Linux: /run/clawshell/clawshell.pid
 /// - macOS: /var/run/clawshell.pid (flat, no subdirectory since /var/run is a symlink to /private/var/run)
 pub fn pid_file_path() -> PathBuf {
-    if cfg!(target_os = "macos") {
-        PathBuf::from("/var/run/clawshell.pid")
-    } else {
-        PathBuf::from("/run/clawshell/clawshell.pid")
-    }
+    PathBuf::from(platform::pid_file_abs_path())
 }
 
 /// Log file location.

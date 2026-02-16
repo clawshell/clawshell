@@ -7,6 +7,7 @@ pub mod config;
 pub mod dlp;
 pub mod keys;
 pub mod onboard;
+pub mod platform;
 pub mod process;
 pub mod proxy;
 pub mod tui;

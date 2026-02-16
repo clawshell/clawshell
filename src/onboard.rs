@@ -1,3 +1,4 @@
+use crate::platform;
 use crate::tui;
 
 use serde_json::Value;
@@ -660,11 +661,7 @@ pub fn backup_openclaw_config(openclaw_path: &Path) -> Result<PathBuf, Box<dyn s
     std::fs::set_permissions(&backup_path, std::fs::Permissions::from_mode(0o000))?;
 
     // Chown the backup to the clawshell user
-    let chown_spec = if cfg!(target_os = "macos") {
-        "clawshell:staff"
-    } else {
-        "clawshell:clawshell"
-    };
+    let chown_spec = platform::clawshell_chown_spec();
     let _ = std::process::Command::new("chown")
         .args([chown_spec, &backup_path.to_string_lossy()])
         .status();
@@ -801,11 +798,7 @@ pub const LAUNCHD_PLIST_PATH: &str = "/Library/LaunchDaemons/com.clawshell.daemo
 
 /// Return the platform-appropriate service file path.
 pub fn autostart_service_path() -> &'static str {
-    if cfg!(target_os = "macos") {
-        LAUNCHD_PLIST_PATH
-    } else {
-        SYSTEMD_SERVICE_PATH
-    }
+    platform::autostart_service_path()
 }
 
 /// Generate a systemd unit file for the ClawShell daemon.
@@ -898,45 +891,13 @@ pub fn install_autostart_service(
     exe_path: &Path,
     config_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let content = if cfg!(target_os = "macos") {
-        generate_launchd_plist(exe_path, config_path)
-    } else {
-        generate_systemd_unit(exe_path, config_path)
-    };
+    let content = platform::autostart_service_content(exe_path, config_path);
 
     let service_path = autostart_service_path();
     let root = crate::process::physical_root();
     let vfs_path = root.join(service_path.trim_start_matches('/'))?;
     install_autostart_service_vfs(&vfs_path, &content)?;
-
-    if cfg!(target_os = "macos") {
-        // Unload if already loaded so launchd picks up the new plist.
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", service_path])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        let _ = std::process::Command::new("chown")
-            .args(["root:wheel", service_path])
-            .status();
-        let _ = std::process::Command::new("chmod")
-            .args(["0644", service_path])
-            .status();
-        // Loading is done separately via start_autostart_service().
-    } else {
-        let status = std::process::Command::new("systemctl")
-            .args(["daemon-reload"])
-            .status()?;
-        if !status.success() {
-            return Err("systemctl daemon-reload failed".into());
-        }
-        let status = std::process::Command::new("systemctl")
-            .args(["enable", "clawshell.service"])
-            .status()?;
-        if !status.success() {
-            return Err("systemctl enable failed".into());
-        }
-    }
+    platform::install_autostart_post_write(service_path)?;
 
     Ok(())
 }
@@ -944,54 +905,18 @@ pub fn install_autostart_service(
 /// Start the auto-start service via the platform service manager.
 pub fn start_autostart_service() -> Result<(), Box<dyn std::error::Error>> {
     let service_path = autostart_service_path();
-
-    if cfg!(target_os = "macos") {
-        let status = std::process::Command::new("launchctl")
-            .args(["load", service_path])
-            .status()?;
-        if !status.success() {
-            return Err(format!("launchctl load failed (exit code {})", status).into());
-        }
-    } else {
-        let status = std::process::Command::new("systemctl")
-            .args(["start", "clawshell.service"])
-            .status()?;
-        if !status.success() {
-            return Err(format!("systemctl start failed (exit code {})", status).into());
-        }
-    }
-
-    Ok(())
+    platform::start_autostart_service(service_path)
 }
 
 /// Remove the auto-start service from the real filesystem and disable it.
 pub fn remove_autostart_service() -> Result<(), Box<dyn std::error::Error>> {
     let service_path = autostart_service_path();
-
-    if cfg!(target_os = "macos") {
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", service_path])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    } else {
-        let _ = std::process::Command::new("systemctl")
-            .args(["disable", "clawshell.service"])
-            .status();
-        let _ = std::process::Command::new("systemctl")
-            .args(["stop", "clawshell.service"])
-            .status();
-    }
+    platform::remove_autostart_service(service_path)?;
 
     let root = crate::process::physical_root();
     let vfs_path = root.join(service_path.trim_start_matches('/'))?;
     remove_autostart_service_vfs(&vfs_path)?;
-
-    if !cfg!(target_os = "macos") {
-        let _ = std::process::Command::new("systemctl")
-            .args(["daemon-reload"])
-            .status();
-    }
+    platform::remove_autostart_post_delete()?;
 
     Ok(())
 }

@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 
 use clawshell::cli::{Cli, Commands};
 use clawshell::config::Config;
+use clawshell::platform;
 use clawshell::process;
 use clawshell::tui;
 use clawshell::{AppState, build_router};
@@ -465,7 +466,7 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     if user_exists {
         tui::print_step_done(1, TOTAL_STEPS, "System user already exists");
     } else {
-        let status = create_system_user("clawshell")?;
+        let status = platform::create_system_user("clawshell")?;
         if !status.success() {
             tui::print_error("Failed to create 'clawshell' user.");
             std::process::exit(1);
@@ -492,11 +493,7 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     // Step 3: Set permissions and ownership
     tui::print_step(3, TOTAL_STEPS, "Setting permissions and ownership...");
 
-    let chown_spec = if cfg!(target_os = "macos") {
-        "clawshell:staff"
-    } else {
-        "clawshell:clawshell"
-    };
+    let chown_spec = platform::clawshell_chown_spec();
 
     if let Err(e) = std::process::Command::new("chmod")
         .args(["0700", &config_dir.to_string_lossy()])
@@ -941,7 +938,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(false);
 
     if user_exists {
-        let status = delete_system_user("clawshell")?;
+        let status = platform::delete_system_user("clawshell")?;
         if status.success() {
             tui::print_success("System user removed.");
         } else {
@@ -976,83 +973,6 @@ fn cmd_version() {
     println!("  {bullet} Streaming support (SSE pass-through)");
 }
 
-/// Create a system user, using platform-appropriate commands.
-fn create_system_user(name: &str) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
-    if cfg!(target_os = "macos") {
-        create_macos_system_user(name)
-    } else {
-        Ok(std::process::Command::new("useradd")
-            .args([
-                "--system",
-                "--no-create-home",
-                "--shell",
-                "/usr/sbin/nologin",
-                name,
-            ])
-            .status()?)
-    }
-}
-
-/// Create a hidden system user on macOS using dscl.
-fn create_macos_system_user(
-    name: &str,
-) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
-    let output = std::process::Command::new("dscl")
-        .args([".", "-list", "/Users", "UniqueID"])
-        .output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let used_uids: Vec<u32> = stdout
-        .lines()
-        .filter_map(|line| line.split_whitespace().last()?.parse().ok())
-        .collect();
-    let uid = (400..500)
-        .rev()
-        .find(|u| !used_uids.contains(u))
-        .ok_or("No available system UID in 400-499 range")?;
-
-    let user_path = format!("/Users/{name}");
-    let uid_str = uid.to_string();
-
-    let dscl = |args: &[&str],
-                desc: &str|
-     -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
-        let status = std::process::Command::new("dscl").args(args).status()?;
-        if !status.success() {
-            eprintln!("Warning: failed to {desc} for '{name}'");
-        }
-        Ok(status)
-    };
-
-    dscl(&[".", "-create", &user_path], "create user record")?;
-    dscl(
-        &[".", "-create", &user_path, "UniqueID", &uid_str],
-        "set UID",
-    )?;
-    dscl(
-        &[".", "-create", &user_path, "PrimaryGroupID", "20"],
-        "set GID",
-    )?;
-    dscl(
-        &[".", "-create", &user_path, "UserShell", "/usr/bin/false"],
-        "set shell",
-    )?;
-    dscl(
-        &[".", "-create", &user_path, "RealName", "ClawShell Service"],
-        "set real name",
-    )?;
-    let status = dscl(
-        &[".", "-create", &user_path, "NFSHomeDirectory", "/var/empty"],
-        "set home directory",
-    )?;
-
-    // Hide the user from the login window
-    let _ = std::process::Command::new("dscl")
-        .args([".", "-create", &user_path, "IsHidden", "1"])
-        .status();
-
-    Ok(status)
-}
-
 /// Start ClawShell directly by spawning a child process (no service manager).
 fn start_clawshell_direct(
     toml_config_path: &std::path::Path,
@@ -1081,15 +1001,4 @@ fn start_clawshell_direct(
     process::write_pid_file(pid)?;
     tui::print_info("PID", &pid.to_string());
     Ok(())
-}
-
-/// Delete a system user, using platform-appropriate commands.
-fn delete_system_user(name: &str) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
-    if cfg!(target_os = "macos") {
-        Ok(std::process::Command::new("dscl")
-            .args([".", "-delete", &format!("/Users/{name}")])
-            .status()?)
-    } else {
-        Ok(std::process::Command::new("userdel").arg(name).status()?)
-    }
 }
