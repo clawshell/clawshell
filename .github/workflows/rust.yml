@@ -22,37 +22,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  linter:
+  tests:
+    name: Cargo fmt,clippy,build,test,tarpaulin
     runs-on: ${{ matrix.os }}
-  
+
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
 
-    name: Cargo fmt and clippy
 
     steps:
     - uses: actions/checkout@v4
-    - name: Check formatting
+
+    - name: Cargo fmt
       run: cargo fmt --all -- --check
 
-  tests:
-    runs-on: ${{ matrix.os }}
+    - name: Cargo clippy
+      run: cargo clippy --all-targets -- -D warnings
 
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-
-    name: Cargo test and tarpaulin
-    needs: linter
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Build
+    - name: Cargo build
       run: cargo build --verbose
 
-    - name: Run tests
+    - name: Cargo test
       run: cargo test --verbose
 
     - name: Install cargo-tarpaulin@${{ env.TARPAULIN_VERSION }}
@@ -61,14 +52,14 @@ jobs:
       with:
         tool: cargo-tarpaulin@${{ env.TARPAULIN_VERSION }}
 
-    - name: Run tarpaulin
+    - name: Cargo tarpaulin
       if: matrix.os == 'ubuntu-latest'
       run: cargo tarpaulin --verbose
 
   audit:
     runs-on: ubuntu-latest
     name: Cargo udeps and audit
-    needs: linter
+    needs: tests
 
     steps:
     - uses: actions/checkout@v4
@@ -93,11 +84,12 @@ jobs:
   check-workflow-status:
     name: Check Workflow Status
     runs-on: ubuntu-latest
+    if: always()
+
     needs:
-      - linter
       - tests
       - audit
-    if: always()
+
     steps:
       - name: Check Workflow Status
         run: |
