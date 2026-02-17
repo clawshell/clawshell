@@ -8,14 +8,6 @@ pub fn clawshell_chown_spec() -> &'static str {
     "clawshell:clawshell"
 }
 
-pub fn pid_file_abs_path() -> &'static str {
-    "/run/clawshell/clawshell.pid"
-}
-
-pub fn pid_file_vfs_rel_path() -> &'static str {
-    "run/clawshell/clawshell.pid"
-}
-
 pub fn autostart_service_path() -> &'static str {
     "/etc/systemd/system/clawshell.service"
 }

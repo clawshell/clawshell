@@ -192,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn cmd_start(config_path: &str, foreground: bool) -> Result<(), Box<dyn std::error::Error>> {
     tui::print_banner("Start");
     if foreground {
-        return cmd_start_inner(config_path, true).await;
+        return cmd_start_inner(config_path).await;
     }
 
     let path = PathBuf::from(config_path);
@@ -209,23 +209,7 @@ async fn cmd_start(config_path: &str, foreground: bool) -> Result<(), Box<dyn st
     Ok(())
 }
 
-async fn cmd_start_inner(
-    config_path: &str,
-    foreground: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Check if already running (skip if PID file points to ourselves — daemon child)
-    let my_pid = std::process::id();
-    if let Some(pid) = process::read_pid_file() {
-        if pid != my_pid && process::is_process_running(pid) {
-            tui::print_error(&format!("ClawShell is already running (PID: {pid})"));
-            std::process::exit(1);
-        }
-        if pid != my_pid {
-            // Stale PID file
-            process::remove_pid_file();
-        }
-    }
-
+async fn cmd_start_inner(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Validate configuration
     let path = PathBuf::from(config_path);
     ensure_config_migrated(&path)?;
@@ -234,43 +218,8 @@ async fn cmd_start_inner(
 
     tui::print_success("Configuration validated successfully.");
 
-    // Ensure runtime directories exist (for PID and log files)
+    // Ensure runtime directories exist (for log files)
     process::ensure_runtime_dirs()?;
-
-    if !foreground {
-        // Daemonize: fork a child process
-        use std::process::Command;
-
-        let exe = std::env::current_exe()?;
-        let log_path = process::log_file_path();
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)?;
-        let log_stderr = log_file.try_clone()?;
-
-        let child = Command::new(exe)
-            .args(["start", "--config", config_path, "--foreground"])
-            .stdout(log_file)
-            .stderr(log_stderr)
-            .stdin(std::process::Stdio::null())
-            .spawn()?;
-
-        let pid = child.id();
-
-        // Write PID file immediately so stop/restart can find the process
-        process::write_pid_file(pid)?;
-
-        tui::print_success(&format!("ClawShell started in background (PID: {pid})"));
-        tui::print_info("Logs", &log_path.display().to_string());
-        return Ok(());
-    }
-
-    // Foreground mode — write PID if not already recorded by the parent daemon
-    let pid = std::process::id();
-    if process::read_pid_file() != Some(pid) {
-        process::write_pid_file(pid)?;
-    }
 
     let env_filter: tracing_subscriber::EnvFilter = config
         .log_level
@@ -314,7 +263,6 @@ async fn cmd_start_inner(
         })
         .await?;
 
-    process::remove_pid_file();
     info!("ClawShell shut down");
     Ok(())
 }
@@ -332,11 +280,6 @@ fn cmd_stop() -> Result<(), Box<dyn std::error::Error>> {
     println!("Stopping ClawShell via service manager...");
     platform::service_stop()?;
     tui::print_success("ClawShell stopped successfully.");
-    if let Some(pid) = process::read_pid_file()
-        && !process::is_process_running(pid)
-    {
-        process::remove_pid_file();
-    }
     tui::print_info("Logs", &process::log_file_path().display().to_string());
     Ok(())
 }
@@ -346,24 +289,9 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
     ensure_service_installed_for_lifecycle()?;
 
     if platform::service_is_running()? {
-        if let Some(pid) = process::read_pid_file()
-            && process::is_process_running(pid)
-        {
-            tui::print_success(&format!("ClawShell is running (PID: {pid})"));
-            if let Some(uptime) = process::get_process_uptime(pid) {
-                tui::print_info("Uptime", &uptime);
-            }
-            return Ok(());
-        }
-
         tui::print_success("ClawShell is running.");
     } else {
         tui::print_warning("ClawShell is not running.");
-        if let Some(pid) = process::read_pid_file()
-            && !process::is_process_running(pid)
-        {
-            process::remove_pid_file();
-        }
     }
     Ok(())
 }
@@ -715,12 +643,6 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(&config_dir)?;
     std::fs::create_dir_all(&log_dir_path)?;
-
-    // Also create runtime dirs for PID files
-    let pid_path = process::pid_file_path();
-    if let Some(pid_parent) = pid_path.parent() {
-        std::fs::create_dir_all(pid_parent)?;
-    }
     tui::print_step_done(2, TOTAL_STEPS, "Directories created");
 
     // Step 3: Set permissions and ownership
@@ -746,15 +668,6 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
             path = %log_dir_path.display(),
             "Failed to set log directory owner"
         );
-    }
-    if let Some(pid_parent) = pid_path.parent() {
-        if let Err(error) = platform::set_owner(pid_parent, false) {
-            warn!(
-                error = %error,
-                path = %pid_parent.display(),
-                "Failed to set PID directory owner"
-            );
-        }
     }
     tui::print_step_done(3, TOTAL_STEPS, "Permissions set");
 
@@ -882,7 +795,7 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Step 9: Start or skip ClawShell
-    let already_running = process::read_pid_file().is_some_and(process::is_process_running);
+    let already_running = platform::service_is_running().unwrap_or(false);
 
     if already_running {
         tui::print_step_done(9, TOTAL_STEPS, "ClawShell already running (skipped)");
@@ -1077,7 +990,6 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("/var/log/clawshell"));
-    let pid_file = process::pid_file_path();
 
     let service_path = std::path::Path::new(crate::onboard::autostart_service_path());
     let service_exists = service_path.exists();
@@ -1086,7 +998,6 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     tui::print_info("ClawShell", "Stop if running");
     tui::print_info("Config dir", &config_dir.display().to_string());
     tui::print_info("Log dir", &log_dir.display().to_string());
-    tui::print_info("PID file", &pid_file.display().to_string());
     if service_exists {
         tui::print_info("Service", &service_path.display().to_string());
     }
@@ -1146,43 +1057,19 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 2. Stop ClawShell if still running (e.g. started without service manager)
-    if let Some(pid) = process::read_pid_file() {
-        if process::is_process_running(pid) {
-            tui::print_info("PID", &pid.to_string());
-            println!("Stopping ClawShell...");
-            process::stop_process(pid)?;
-            tui::print_success("ClawShell stopped.");
-        } else {
-            process::remove_pid_file();
-        }
-    }
-
-    // 3. Remove PID file (in case stop_process didn't clean it)
-    if pid_file.exists() {
-        let _ = std::fs::remove_file(&pid_file);
-        tui::print_success("PID file removed.");
-    }
-    // Also remove the PID parent directory if it's a clawshell-specific dir
-    if let Some(pid_dir) = pid_file.parent()
-        && pid_dir.ends_with("clawshell")
-    {
-        let _ = std::fs::remove_dir(pid_dir);
-    }
-
-    // 4. Remove log directory
+    // 2. Remove log directory
     if log_dir.exists() {
         std::fs::remove_dir_all(&log_dir)?;
         tui::print_success("Log directory removed.");
     }
 
-    // 5. Remove configuration directory
+    // 3. Remove configuration directory
     if config_dir.exists() {
         std::fs::remove_dir_all(&config_dir)?;
         tui::print_success("Configuration directory removed.");
     }
 
-    // 6. Remove the clawshell system user
+    // 4. Remove the clawshell system user
     let user_exists = std::process::Command::new("id")
         .arg("clawshell")
         .stdout(std::process::Stdio::null())
@@ -1199,7 +1086,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 7. Preserve the binary so users can still run clawshell later.
+    // 5. Preserve the binary so users can still run clawshell later.
     if exe_path.exists() {
         tui::print_info("Binary", &format!("Preserved at {}", exe_path.display()));
     } else {
@@ -1251,7 +1138,6 @@ fn start_clawshell_direct(
         .spawn()?;
 
     let pid = child.id();
-    process::write_pid_file(pid)?;
-    tui::print_info("PID", &pid.to_string());
+    tui::print_info("Process ID", &pid.to_string());
     Ok(())
 }

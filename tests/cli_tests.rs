@@ -35,16 +35,6 @@ base_url = "https://api.openai.com"
     std::fs::write(path, content).unwrap();
 }
 
-#[cfg(target_os = "linux")]
-fn pid_file_path() -> std::path::PathBuf {
-    "/run/clawshell/clawshell.pid".into()
-}
-
-#[cfg(target_os = "macos")]
-fn pid_file_path() -> std::path::PathBuf {
-    "/var/run/clawshell.pid".into()
-}
-
 fn log_file_path() -> std::path::PathBuf {
     "/var/log/clawshell/clawshell.log".into()
 }
@@ -111,8 +101,6 @@ fn test_version_output() {
 
 #[test]
 fn test_status_when_not_running() {
-    let _ = std::fs::remove_file(pid_file_path());
-
     if service_installed() {
         cmd()
             .arg("status")
@@ -132,8 +120,6 @@ fn test_status_when_not_running() {
 
 #[test]
 fn test_stop_when_not_running() {
-    let _ = std::fs::remove_file(pid_file_path());
-
     if service_installed() {
         // Service lifecycle tests in service-installed environments require root/system setup.
         // Skip to keep CLI tests hermetic.

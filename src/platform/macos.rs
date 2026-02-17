@@ -8,14 +8,6 @@ pub fn clawshell_chown_spec() -> &'static str {
     "clawshell:staff"
 }
 
-pub fn pid_file_abs_path() -> &'static str {
-    "/var/run/clawshell.pid"
-}
-
-pub fn pid_file_vfs_rel_path() -> &'static str {
-    "var/run/clawshell.pid"
-}
-
 pub fn autostart_service_path() -> &'static str {
     "/Library/LaunchDaemons/com.clawshell.daemon.plist"
 }
