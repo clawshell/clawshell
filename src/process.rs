@@ -9,6 +9,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
 use vfs::VfsPath;
 
+/// Maximum time to wait for graceful shutdown before sending SIGKILL (in milliseconds).
+const GRACEFUL_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
+
+/// Interval between checks when waiting for process to exit (in milliseconds).
+const SHUTDOWN_POLL_INTERVAL_MS: u64 = 100;
+
 /// Default configuration directory.
 pub const CONFIG_DIR: &str = "/etc/clawshell";
 
@@ -113,13 +119,14 @@ pub fn stop_process(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
     signal::kill(nix_pid, Signal::SIGTERM)
         .map_err(|e| format!("Failed to send SIGTERM to process {}: {}", pid, e))?;
 
-    // Wait for the process to exit (up to 10 seconds)
-    for _ in 0..100 {
+    // Wait for the process to exit gracefully
+    let max_iterations = GRACEFUL_SHUTDOWN_TIMEOUT_MS / SHUTDOWN_POLL_INTERVAL_MS;
+    for _ in 0..max_iterations {
         if !is_process_running(pid) {
             remove_pid_file();
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(SHUTDOWN_POLL_INTERVAL_MS));
     }
 
     // Force kill if still running
