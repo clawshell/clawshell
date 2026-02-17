@@ -12,7 +12,7 @@
 
 ## 📖 Introduction
 
-**ClawShell** is a security-privileged process for the **OpenClaw** ecosystem. It sits between OpenClaw and upstream LLM API providers (OpenAI, Anthropic), performing virtual-to-real API key mapping and DLP (Data Loss Prevention) scanning on request and response bodies.
+**ClawShell** is a security-privileged process for the **OpenClaw** ecosystem. It sits between OpenClaw and upstream LLM API providers (OpenAI, Anthropic), performing virtual-to-real API key mapping and DLP (Data Loss Prevention) scanning on request and response bodies. It can also expose a Gmail read endpoint with sender allowlist/denylist filtering.
 
 OpenClaw never holds real API keys, only virtual keys that ClawShell swaps for real ones before forwarding requests upstream. Real keys are stored in a privileged config directory (`/etc/clawshell`) protected by Unix file system permissions.
 
@@ -33,12 +33,20 @@ ClawShell scans HTTP request and response bodies for sensitive data using config
 - **Response Scanning**: Optionally scans upstream responses and redacts detected PII before returning to OpenClaw. Streaming (SSE) responses are passed through without scanning.
 - **Custom Patterns**: Define sensitive data patterns using regex in the TOML config, each with a `block` or `redact` action.
 
-### 3. Seamless Integration
+### 3. Gmail Sender Filtering Endpoint
+
+ClawShell can expose `GET /v1/gmail/messages` to fetch Gmail messages and filter visibility by sender policy.
+
+- **Explicit Mode**: Configure `gmail.mode = "allowlist"` or `gmail.mode = "denylist"` to avoid ambiguous behavior.
+- **Per-Key Gmail Credentials**: Map virtual keys to Gmail OAuth refresh credentials under `[[gmail.accounts]]` using `refresh_token` + `client_secret_file`.
+- **Sender Rules**: Supports exact email rules (`alice@example.com`) and domain rules (`@example.com`).
+
+### 4. Seamless Integration
 
 - **Drop-in Sidecar**: Deploys alongside OpenClaw without requiring re-install — the `clawshell onboard` command automatically configure OpenClaw to point at ClawShell's address and it forwards all requests upstream.
 - **No External Dependencies**: Uses Unix file system permissions to protect secrets. No IdP, Vault, or external key management service required.
 
-### 4. Ultra Lightweight and Scalable
+### 5. Ultra Lightweight and Scalable
 
 - Runs in under 10MB of memory.
 - Written in Rust with Tokio.
@@ -197,6 +205,22 @@ patterns = [
     { name = "visa_card", regex = '\b4[0-9]{12}(?:[0-9]{3})?\b',    action = "redact" },
     { name = "amex_card", regex = '\b3[47][0-9]{13}\b',              action = "redact" },
 ]
+
+# Gmail secure endpoint
+[gmail]
+enabled = true
+mode = "allowlist"
+allow_senders = ["alice@example.com", "@trusted.org"]
+deny_senders = []
+default_max_results = 50
+api_base_url = "https://gmail.googleapis.com/"
+
+[[gmail.accounts]]
+virtual_key = "vk-gmail-001"
+# Refresh-token auth (required)
+refresh_token = "1//long-lived-refresh-token"
+client_secret_file = "/etc/clawshell/oauth/client_secret.json"
+user_id = "me"
 ```
 
 If `start`, `restart`, `stop`, `config --edit`, `onboard`, or `uninstall` reports that migration is required, run:

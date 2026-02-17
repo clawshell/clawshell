@@ -31,6 +31,8 @@ pub struct Config {
     pub keys: Vec<KeyMapping>,
     #[serde(default)]
     pub dlp: DlpConfig,
+    #[serde(default, skip_serializing_if = "GmailConfig::is_default")]
+    pub gmail: GmailConfig,
     #[serde(default = "default_log_level")]
     pub log_level: String,
 }
@@ -123,6 +125,76 @@ pub struct DlpPattern {
     pub action: DlpAction,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GmailConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<GmailMode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_senders: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_senders: Vec<String>,
+    #[serde(default = "default_gmail_max_results")]
+    pub default_max_results: u32,
+    #[serde(default = "default_gmail_api_base_url")]
+    pub api_base_url: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<GmailAccountConfig>,
+}
+
+impl GmailConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl Default for GmailConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: None,
+            allow_senders: Vec::new(),
+            deny_senders: Vec::new(),
+            default_max_results: default_gmail_max_results(),
+            api_base_url: default_gmail_api_base_url(),
+            accounts: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GmailMode {
+    Allowlist,
+    Denylist,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GmailAccountConfig {
+    pub virtual_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret_file: Option<String>,
+    #[serde(default = "default_gmail_user_id")]
+    pub user_id: String,
+}
+
+fn default_gmail_user_id() -> String {
+    "me".to_string()
+}
+
+fn default_gmail_max_results() -> u32 {
+    50
+}
+
+fn default_gmail_api_base_url() -> String {
+    "https://gmail.googleapis.com/".to_string()
+}
+
 impl Config {
     pub(crate) fn from_str_with_validation(
         content: &str,
@@ -147,6 +219,101 @@ impl Config {
             Regex::new(&pattern.regex)
                 .map_err(|e| format!("Invalid DLP regex for '{}': {}", pattern.name, e))?;
         }
+        self.validate_gmail()?;
+        Ok(())
+    }
+
+    fn validate_gmail(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let gmail = &self.gmail;
+
+        if gmail.default_max_results == 0 || gmail.default_max_results > 100 {
+            return Err(format!(
+                "gmail.default_max_results must be between 1 and 100 (got {})",
+                gmail.default_max_results
+            )
+            .into());
+        }
+
+        for sender in &gmail.allow_senders {
+            validate_sender_rule(sender)
+                .map_err(|e| format!("invalid allow_senders entry: {e}"))?;
+        }
+        for sender in &gmail.deny_senders {
+            validate_sender_rule(sender).map_err(|e| format!("invalid deny_senders entry: {e}"))?;
+        }
+
+        let has_gmail_settings = gmail.enabled
+            || gmail.mode.is_some()
+            || !gmail.allow_senders.is_empty()
+            || !gmail.deny_senders.is_empty()
+            || !gmail.accounts.is_empty();
+
+        if !has_gmail_settings {
+            return Ok(());
+        }
+
+        let mode = gmail
+            .mode
+            .ok_or("gmail.mode is required when gmail settings are configured")?;
+
+        match mode {
+            GmailMode::Allowlist => {
+                if gmail.allow_senders.is_empty() {
+                    return Err(
+                        "gmail.allow_senders must be non-empty when gmail.mode = \"allowlist\""
+                            .into(),
+                    );
+                }
+                if !gmail.deny_senders.is_empty() {
+                    return Err(
+                        "gmail.deny_senders must be empty when gmail.mode = \"allowlist\"".into(),
+                    );
+                }
+            }
+            GmailMode::Denylist => {
+                if gmail.deny_senders.is_empty() {
+                    return Err(
+                        "gmail.deny_senders must be non-empty when gmail.mode = \"denylist\""
+                            .into(),
+                    );
+                }
+                if !gmail.allow_senders.is_empty() {
+                    return Err(
+                        "gmail.allow_senders must be empty when gmail.mode = \"denylist\"".into(),
+                    );
+                }
+            }
+        }
+
+        if gmail.enabled && gmail.accounts.is_empty() {
+            return Err("gmail.accounts must be non-empty when gmail.enabled = true".into());
+        }
+
+        for account in &gmail.accounts {
+            if account.virtual_key.trim().is_empty() {
+                return Err("gmail.accounts[].virtual_key must be non-empty".into());
+            }
+
+            let has_refresh_token = account
+                .refresh_token
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty());
+            let has_client_secret_file = account
+                .client_secret_file
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty());
+            if !has_refresh_token || !has_client_secret_file {
+                return Err(
+                    "gmail.accounts[] requires non-empty refresh_token and client_secret_file"
+                        .into(),
+                );
+            }
+
+            if account.user_id.trim().is_empty() {
+                return Err("gmail.accounts[].user_id must be non-empty".into());
+            }
+        }
+
         Ok(())
     }
 
@@ -171,6 +338,80 @@ impl Config {
     pub fn listen_addr(&self) -> String {
         format!("{}:{}", self.server.host, self.server.port)
     }
+}
+
+fn validate_sender_rule(rule: &str) -> Result<(), String> {
+    let rule = rule.trim().to_ascii_lowercase();
+    if rule.is_empty() {
+        return Err("sender rule cannot be empty".to_string());
+    }
+    if let Some(domain) = rule.strip_prefix('@') {
+        validate_domain(domain).map_err(|e| format!("domain rule '{rule}' is invalid: {e}"))?;
+        return Ok(());
+    }
+    validate_email(&rule).map_err(|e| format!("email rule '{rule}' is invalid: {e}"))
+}
+
+fn validate_email(email: &str) -> Result<(), String> {
+    let mut parts = email.split('@');
+    let local = parts.next().unwrap_or_default();
+    let domain = parts.next().unwrap_or_default();
+    if parts.next().is_some() {
+        return Err("must contain exactly one '@'".to_string());
+    }
+    if local.is_empty() {
+        return Err("local part cannot be empty".to_string());
+    }
+    if !local.chars().all(is_valid_email_local_char) {
+        return Err("local part contains invalid characters".to_string());
+    }
+    validate_domain(domain)?;
+    Ok(())
+}
+
+fn validate_domain(domain: &str) -> Result<(), String> {
+    if domain.is_empty() {
+        return Err("domain cannot be empty".to_string());
+    }
+    if domain.starts_with('.') || domain.ends_with('.') || domain.contains("..") {
+        return Err("domain has invalid dot placement".to_string());
+    }
+    if !domain.contains('.') {
+        return Err("domain must contain at least one dot".to_string());
+    }
+    if !domain
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-')
+    {
+        return Err("domain contains invalid characters".to_string());
+    }
+    Ok(())
+}
+
+fn is_valid_email_local_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(
+            ch,
+            '.' | '!'
+                | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '*'
+                | '+'
+                | '-'
+                | '/'
+                | '='
+                | '?'
+                | '^'
+                | '_'
+                | '`'
+                | '{'
+                | '|'
+                | '}'
+                | '~'
+        )
 }
 
 #[cfg(test)]
@@ -298,5 +539,289 @@ mod tests {
     fn test_config_from_file_is_directory() {
         let result = Config::from_file(Path::new("/tmp"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_gmail_allowlist_mode_valid() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+
+[gmail]
+enabled = true
+mode = "allowlist"
+allow_senders = ["alice@example.com", "@trusted.org"]
+
+[[gmail.accounts]]
+virtual_key = "vk-gmail"
+refresh_token = "refresh-token"
+client_secret_file = "/etc/clawshell/google-client-secret.json"
+"#;
+        let parsed = Config::parse(cfg);
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn test_gmail_allowlist_rejects_deny_senders() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+
+[gmail]
+enabled = true
+mode = "allowlist"
+allow_senders = ["alice@example.com"]
+deny_senders = ["bob@example.com"]
+
+[[gmail.accounts]]
+virtual_key = "vk-gmail"
+refresh_token = "refresh-token"
+client_secret_file = "/etc/clawshell/google-client-secret.json"
+"#;
+        let err = Config::parse(cfg).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("gmail.deny_senders must be empty when gmail.mode = \"allowlist\"")
+        );
+    }
+
+    #[test]
+    fn test_gmail_denylist_requires_non_empty_list() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+
+[gmail]
+enabled = true
+mode = "denylist"
+
+[[gmail.accounts]]
+virtual_key = "vk-gmail"
+refresh_token = "refresh-token"
+client_secret_file = "/etc/clawshell/google-client-secret.json"
+"#;
+        let err = Config::parse(cfg).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("gmail.deny_senders must be non-empty when gmail.mode = \"denylist\"")
+        );
+    }
+
+    #[test]
+    fn test_gmail_rejects_invalid_sender_rule() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+
+[gmail]
+enabled = true
+mode = "allowlist"
+allow_senders = ["not-an-email"]
+
+[[gmail.accounts]]
+virtual_key = "vk-gmail"
+refresh_token = "refresh-token"
+client_secret_file = "/etc/clawshell/google-client-secret.json"
+"#;
+        let err = Config::parse(cfg).unwrap_err();
+        assert!(err.to_string().contains("invalid allow_senders entry"));
+    }
+
+    #[test]
+    fn test_gmail_rejects_invalid_default_max_results() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+
+[gmail]
+enabled = true
+mode = "allowlist"
+allow_senders = ["alice@example.com"]
+default_max_results = 0
+
+[[gmail.accounts]]
+virtual_key = "vk-gmail"
+refresh_token = "refresh-token"
+client_secret_file = "/etc/clawshell/google-client-secret.json"
+"#;
+        let err = Config::parse(cfg).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("gmail.default_max_results must be between 1 and 100")
+        );
+    }
+
+    #[test]
+    fn test_gmail_accepts_refresh_credentials() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+
+[gmail]
+enabled = true
+mode = "allowlist"
+allow_senders = ["alice@example.com"]
+
+[[gmail.accounts]]
+virtual_key = "vk-gmail"
+refresh_token = "refresh-token"
+client_secret_file = "/etc/clawshell/google-client-secret.json"
+"#;
+        let parsed = Config::parse(cfg);
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn test_gmail_rejects_missing_client_secret_file() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+
+[gmail]
+enabled = true
+mode = "allowlist"
+allow_senders = ["alice@example.com"]
+
+[[gmail.accounts]]
+virtual_key = "vk-gmail"
+refresh_token = "refresh-token"
+"#;
+        let err = Config::parse(cfg).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "gmail.accounts[] requires non-empty refresh_token and client_secret_file"
+            )
+        );
+    }
+
+    #[test]
+    fn test_gmail_rejects_partial_refresh_credentials() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+
+[gmail]
+enabled = true
+mode = "allowlist"
+allow_senders = ["alice@example.com"]
+
+[[gmail.accounts]]
+virtual_key = "vk-gmail"
+refresh_token = "refresh-token"
+"#;
+        let err = Config::parse(cfg).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "gmail.accounts[] requires non-empty refresh_token and client_secret_file"
+            )
+        );
+    }
+
+    #[test]
+    fn test_gmail_rejects_access_token_field() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+
+[gmail]
+enabled = true
+mode = "allowlist"
+allow_senders = ["alice@example.com"]
+
+[[gmail.accounts]]
+virtual_key = "vk-gmail"
+access_token = "ya29.legacy"
+refresh_token = "refresh-token"
+client_secret_file = "/etc/clawshell/google-client-secret.json"
+"#;
+        let err = Config::parse(cfg).unwrap_err();
+        assert!(err.to_string().contains("unknown field `access_token`"));
+    }
+
+    #[test]
+    fn test_gmail_rejects_legacy_client_id_field() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+
+[gmail]
+enabled = true
+mode = "allowlist"
+allow_senders = ["alice@example.com"]
+
+[[gmail.accounts]]
+virtual_key = "vk-gmail"
+refresh_token = "refresh-token"
+client_secret_file = "/etc/clawshell/google-client-secret.json"
+client_id = "legacy-client-id"
+"#;
+        let err = Config::parse(cfg).unwrap_err();
+        assert!(err.to_string().contains("unknown field `client_id`"));
+    }
+
+    #[test]
+    fn test_gmail_rejects_missing_refresh_credentials() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+
+[gmail]
+enabled = true
+mode = "allowlist"
+allow_senders = ["alice@example.com"]
+
+[[gmail.accounts]]
+virtual_key = "vk-gmail"
+"#;
+        let err = Config::parse(cfg).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "gmail.accounts[] requires non-empty refresh_token and client_secret_file"
+            )
+        );
     }
 }

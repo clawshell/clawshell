@@ -100,12 +100,13 @@ fn test_help_output() {
 
 #[test]
 fn test_version_output() {
+    let expected = format!("v{}", env!("CARGO_PKG_VERSION"));
     cmd()
         .arg("version")
         .assert()
         .success()
         .stdout(contains("clawshell").or(contains("ClawShell").or(contains("Clawshell"))))
-        .stdout(contains("v0.0.2"))
+        .stdout(contains(expected))
         .stdout(contains("openclaw").or(contains("OpenClaw")));
 }
 

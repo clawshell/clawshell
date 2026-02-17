@@ -6,6 +6,7 @@ mod app;
 mod cli;
 mod config;
 mod dlp;
+mod gmail;
 mod keys;
 mod migration;
 mod onboard;
@@ -107,6 +108,181 @@ fn paths_equivalent(left: &Path, right: &Path) -> bool {
     canonicalize_or_original(left) == canonicalize_or_original(right)
 }
 
+fn resolve_config_relative_path(config_dir: &Path, configured_path: &str) -> PathBuf {
+    let path = PathBuf::from(configured_path);
+    if path.is_absolute() {
+        path
+    } else {
+        config_dir.join(path)
+    }
+}
+
+fn try_read_openclaw_config_path(clawshell_config_file: &Path) -> Option<PathBuf> {
+    let config_content = std::fs::read_to_string(clawshell_config_file).ok()?;
+    let config_json = serde_json::from_str::<serde_json::Value>(&config_content).ok()?;
+    config_json
+        .get("openclaw_config_path")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+}
+
+fn write_onboard_gmail_client_secret_file(
+    config_dir: &Path,
+    ob_config: &crate::onboard::OnboardConfig,
+) -> Result<Option<PathBuf>, Box<dyn Error>> {
+    let Some(gmail) = ob_config.gmail.as_ref() else {
+        return Ok(None);
+    };
+
+    let secret_path = resolve_config_relative_path(config_dir, &gmail.client_secret_file);
+    if let Some(parent) = secret_path.parent() {
+        std::fs::create_dir_all(parent)?;
+        if let Err(error) = platform::set_mode(parent, 0o700) {
+            warn!(
+                error = %error,
+                path = %parent.display(),
+                "Failed to set Gmail OAuth directory permissions"
+            );
+        }
+        if let Err(error) = platform::set_owner(parent, false) {
+            warn!(
+                error = %error,
+                path = %parent.display(),
+                "Failed to set Gmail OAuth directory owner"
+            );
+        }
+    }
+
+    std::fs::write(&secret_path, &gmail.client_secret_json)?;
+    if let Err(error) = platform::set_mode(&secret_path, 0o600) {
+        warn!(
+            error = %error,
+            path = %secret_path.display(),
+            "Failed to set Gmail OAuth file permissions"
+        );
+    }
+    if let Err(error) = platform::set_owner(&secret_path, false) {
+        warn!(
+            error = %error,
+            path = %secret_path.display(),
+            "Failed to set Gmail OAuth file owner"
+        );
+    }
+
+    Ok(Some(secret_path))
+}
+
+fn write_onboard_openclaw_skill(
+    ob_config: &crate::onboard::OnboardConfig,
+) -> Result<Option<PathBuf>, Box<dyn Error>> {
+    let Some(skill) = onboard::render_openclaw_gmail_messages_skill(ob_config) else {
+        return Ok(None);
+    };
+
+    let openclaw_root = onboard::openclaw_config_root(&ob_config.openclaw_config_path);
+    let skill_dir = openclaw_root.join("skills").join(skill.name);
+    std::fs::create_dir_all(&skill_dir)?;
+
+    for file in skill.files {
+        let path = skill_dir.join(file.relative_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, file.content)?;
+    }
+
+    if !align_owner_with_openclaw_path(&skill_dir, &ob_config.openclaw_config_path)? {
+        warn!(
+            path = %skill_dir.display(),
+            openclaw_path = %ob_config.openclaw_config_path.display(),
+            "Could not determine OpenClaw file owner while writing skill files; will retry later"
+        );
+    }
+
+    Ok(Some(skill_dir))
+}
+
+fn resolve_openclaw_owner_spec(openclaw_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let read_owner = |path: &Path| -> Result<(u32, u32), Box<dyn Error>> {
+        let metadata = std::fs::metadata(path)?;
+        Ok((metadata.uid(), metadata.gid()))
+    };
+
+    let file_owner = if openclaw_path.exists() {
+        Some(read_owner(openclaw_path)?)
+    } else {
+        None
+    };
+    let parent_owner = openclaw_path
+        .parent()
+        .filter(|parent| parent.exists())
+        .map(read_owner)
+        .transpose()?;
+    let root_entry_owner = {
+        let root = onboard::openclaw_config_root(openclaw_path);
+        if root.exists() {
+            let mut found = None;
+            for entry in std::fs::read_dir(root)? {
+                let entry = entry?;
+                found = Some(read_owner(&entry.path())?);
+                if let Some((uid, _)) = found
+                    && uid != 0
+                {
+                    break;
+                }
+            }
+            found
+        } else {
+            None
+        }
+    };
+
+    let preferred = file_owner
+        .filter(|(uid, _)| *uid != 0)
+        .or_else(|| root_entry_owner.filter(|(uid, _)| *uid != 0))
+        .or_else(|| parent_owner.filter(|(uid, _)| *uid != 0))
+        .or(file_owner)
+        .or(root_entry_owner)
+        .or(parent_owner);
+
+    Ok(preferred.map(|(uid, gid)| format!("{uid}:{gid}")))
+}
+
+fn chown_path(path: &Path, owner_spec: &str, recursive: bool) -> Result<(), Box<dyn Error>> {
+    let mut command = std::process::Command::new("chown");
+    if recursive {
+        command.arg("-R");
+    }
+    let path_arg = path.to_string_lossy().into_owned();
+    command.args([owner_spec, path_arg.as_str()]);
+    let output = command.output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "chown failed for '{}' with owner '{}': status={}, stderr={}",
+        path.display(),
+        owner_spec,
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+    .into())
+}
+
+fn align_owner_with_openclaw_path(
+    path: &Path,
+    openclaw_path: &Path,
+) -> Result<bool, Box<dyn Error>> {
+    let Some(owner_spec) = resolve_openclaw_owner_spec(openclaw_path)? else {
+        return Ok(false);
+    };
+    chown_path(path, &owner_spec, true)?;
+    Ok(true)
+}
+
 fn ensure_service_installed_for_lifecycle() -> Result<(), Box<dyn Error>> {
     if platform::service_exists()? {
         return Ok(());
@@ -161,8 +337,21 @@ fn print_migration_status(path: &str, status: &VersionGateStatus) {
     }
 }
 
+fn ensure_rustls_crypto_provider() -> Result<(), Box<dyn Error>> {
+    if rustls::crypto::CryptoProvider::get_default().is_some() {
+        return Ok(());
+    }
+
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| std::io::Error::other("failed to install rustls ring CryptoProvider"))?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ensure_rustls_crypto_provider()?;
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -231,6 +420,8 @@ async fn cmd_start_inner(
     ensure_config_migrated(&path)?;
     let config = Config::from_file(&path)
         .map_err(|e| format!("Failed to load configuration from '{}': {}", config_path, e))?;
+    let app_state = AppState::from_config(&config, Some(&path))
+        .map_err(|e| format!("Failed to initialize app state: {e}"))?;
 
     tui::print_success("Configuration validated successfully.");
 
@@ -295,7 +486,7 @@ async fn cmd_start_inner(
     );
 
     let addr: SocketAddr = config.listen_addr().parse()?;
-    let app = build_router(AppState::from_config(&config));
+    let app = build_router(app_state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("Listening on {}", addr);
 
@@ -773,6 +964,7 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     let toml_config_path = config_dir.join("clawshell.toml");
     let toml_content = onboard::generate_clawshell_config(&ob_config);
     std::fs::write(&toml_config_path, &toml_content)?;
+    let gmail_secret_path = write_onboard_gmail_client_secret_file(&config_dir, &ob_config)?;
 
     let config_json = serde_json::json!({
         "real_api_key": ob_config.real_api_key,
@@ -812,9 +1004,22 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
             "Failed to set clawshell.toml owner"
         );
     }
+    if let Some(path) = gmail_secret_path {
+        tui::print_info("Gmail OAuth file", &path.display().to_string());
+    }
     tui::print_step_done(5, TOTAL_STEPS, "Configuration written");
 
-    // Step 6: OpenClaw config path was already asked in step 4
+    // Step 6: Write OpenClaw skill files
+    tui::print_step(6, TOTAL_STEPS, "Writing OpenClaw skills...");
+    let openclaw_skill_path = write_onboard_openclaw_skill(&ob_config)?;
+    if let Some(path) = openclaw_skill_path.as_ref() {
+        tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills written");
+        tui::print_info("OpenClaw skill", &path.display().to_string());
+    } else {
+        tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills skipped");
+    }
+
+    // OpenClaw config path was already asked in step 4
     let openclaw_path = &ob_config.openclaw_config_path;
 
     // Step 7 & 8: Backup and modify OpenClaw configuration
@@ -832,6 +1037,9 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
         let openclaw_content = std::fs::read_to_string(openclaw_path)?;
         let modified_content = onboard::modify_openclaw_config(&openclaw_content, &ob_config)?;
         std::fs::write(openclaw_path, &modified_content)?;
+        if let Some(skill_path) = openclaw_skill_path.as_ref() {
+            align_owner_with_openclaw_path(skill_path, openclaw_path)?;
+        }
         tui::print_step_done(8, TOTAL_STEPS, "OpenClaw config updated");
     } else {
         actual_backup_path = None;
@@ -847,6 +1055,9 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
         tui::print_step(8, TOTAL_STEPS, "Creating new OpenClaw configuration...");
         let modified_content = onboard::modify_openclaw_config("{}", &ob_config)?;
         std::fs::write(openclaw_path, &modified_content)?;
+        if let Some(skill_path) = openclaw_skill_path.as_ref() {
+            align_owner_with_openclaw_path(skill_path, openclaw_path)?;
+        }
         tui::print_step_done(8, TOTAL_STEPS, "OpenClaw config created");
         tui::print_info("Path", &openclaw_path.display().to_string());
     }
@@ -911,6 +1122,14 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     tui::print_info("Provider", &ob_config.provider);
     tui::print_info("Model", &ob_config.model);
     tui::print_info("Virtual Key", &ob_config.virtual_api_key);
+    tui::print_info(
+        "Gmail",
+        if ob_config.gmail.is_some() {
+            "configured"
+        } else {
+            "not configured"
+        },
+    );
     tui::print_info(
         "Server",
         &format!("http://{}:{}", ob_config.server_host, ob_config.server_port),
@@ -1081,6 +1300,17 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
 
     let service_path = std::path::Path::new(crate::onboard::autostart_service_path());
     let service_exists = service_path.exists();
+    let clawshell_config_file = config_dir.join("config.json");
+    let openclaw_path = if clawshell_config_file.exists() {
+        try_read_openclaw_config_path(&clawshell_config_file)
+    } else {
+        None
+    };
+    let openclaw_skill_dir = openclaw_path.as_ref().map(|path| {
+        onboard::openclaw_config_root(path)
+            .join("skills")
+            .join(onboard::OPENCLAW_GMAIL_MESSAGES_SKILL_NAME)
+    });
 
     tui::print_warning("This will remove the following:");
     tui::print_info("ClawShell", "Stop if running");
@@ -1089,6 +1319,11 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     tui::print_info("PID file", &pid_file.display().to_string());
     if service_exists {
         tui::print_info("Service", &service_path.display().to_string());
+    }
+    if let Some(skill_dir) = openclaw_skill_dir.as_ref()
+        && skill_dir.exists()
+    {
+        tui::print_info("OpenClaw skill", &skill_dir.display().to_string());
     }
     tui::print_info("Binary", &format!("{} (preserved)", exe_path.display()));
     tui::print_info("System user", "clawshell");
@@ -1105,35 +1340,54 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 0. Clean up OpenClaw configuration (before any destructive operations)
-    let clawshell_config_file = config_dir.join("config.json");
-    if clawshell_config_file.exists()
-        && let Ok(config_content) = std::fs::read_to_string(&clawshell_config_file)
-        && let Ok(config_json) = serde_json::from_str::<serde_json::Value>(&config_content)
-        && let Some(openclaw_path_str) = config_json
-            .get("openclaw_config_path")
-            .and_then(|v| v.as_str())
+    if let Some(openclaw_path) = openclaw_path.as_ref()
+        && openclaw_path.exists()
     {
-        let openclaw_path = PathBuf::from(openclaw_path_str);
-        if openclaw_path.exists() {
-            let openclaw_content = std::fs::read_to_string(&openclaw_path)?;
+        let openclaw_content = std::fs::read_to_string(openclaw_path)?;
 
-            // Guard: reject uninstall if clawshell is the default model
-            if crate::onboard::is_clawshell_default_model(&openclaw_content)? {
-                tui::print_error(
-                    "ClawShell model is currently set as the default model in OpenClaw.",
-                );
-                tui::print_error(&format!(
-                    "Please change the default model in {} before uninstalling.",
-                    openclaw_path.display()
-                ));
-                std::process::exit(1);
+        // Guard: reject uninstall if clawshell is the default model
+        if crate::onboard::is_clawshell_default_model(&openclaw_content)? {
+            tui::print_error("ClawShell model is currently set as the default model in OpenClaw.");
+            tui::print_error(&format!(
+                "Please change the default model in {} before uninstalling.",
+                openclaw_path.display()
+            ));
+            std::process::exit(1);
+        }
+
+        // Remove clawshell entries from OpenClaw config
+        tui::print_info("Action", "Cleaning up OpenClaw configuration...");
+        let cleaned = crate::onboard::remove_openclaw_entries(&openclaw_content)?;
+        std::fs::write(openclaw_path, cleaned)?;
+        tui::print_success("OpenClaw configuration cleaned up.");
+    }
+
+    // 0b. Remove ClawShell-managed OpenClaw skill if present.
+    if let Some(skill_dir) = openclaw_skill_dir.as_ref()
+        && skill_dir.exists()
+    {
+        let remove_skill = if skip_confirm {
+            true
+        } else {
+            let prompt = format!("Remove OpenClaw skill at {}?", skill_dir.display());
+            tui::prompt_confirm(&prompt, true)?
+        };
+
+        if remove_skill {
+            match std::fs::remove_dir_all(skill_dir) {
+                Ok(()) => {
+                    tui::print_success(&format!("OpenClaw skill removed: {}", skill_dir.display()))
+                }
+                Err(error) => tui::print_warning(&format!(
+                    "Failed to remove OpenClaw skill at {}: {error}",
+                    skill_dir.display()
+                )),
             }
-
-            // Remove clawshell entries from OpenClaw config
-            tui::print_info("Action", "Cleaning up OpenClaw configuration...");
-            let cleaned = crate::onboard::remove_openclaw_entries(&openclaw_content)?;
-            std::fs::write(&openclaw_path, cleaned)?;
-            tui::print_success("OpenClaw configuration cleaned up.");
+        } else {
+            tui::print_info(
+                "Skipped",
+                &format!("OpenClaw skill preserved at {}", skill_dir.display()),
+            );
         }
     }
 
