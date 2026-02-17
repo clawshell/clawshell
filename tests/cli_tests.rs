@@ -49,6 +49,20 @@ fn log_file_path() -> std::path::PathBuf {
     "/var/log/clawshell/clawshell.log".into()
 }
 
+#[cfg(target_os = "linux")]
+fn service_path() -> &'static str {
+    "/etc/systemd/system/clawshell.service"
+}
+
+#[cfg(target_os = "macos")]
+fn service_path() -> &'static str {
+    "/Library/LaunchDaemons/com.clawshell.daemon.plist"
+}
+
+fn service_installed() -> bool {
+    Path::new(service_path()).exists()
+}
+
 /// Try to ensure the log directory exists so tests can write log files.
 /// Returns true if we have write access.
 fn ensure_log_dir() -> bool {
@@ -99,22 +113,39 @@ fn test_version_output() {
 fn test_status_when_not_running() {
     let _ = std::fs::remove_file(pid_file_path());
 
+    if service_installed() {
+        cmd()
+            .arg("status")
+            .assert()
+            .success()
+            .stdout(contains("ClawShell"));
+        return;
+    }
+
     cmd()
         .arg("status")
         .assert()
-        .success()
-        .stdout(contains("not running"));
+        .failure()
+        .stderr(contains("service is not installed"))
+        .stderr(contains("clawshell onboard"));
 }
 
 #[test]
 fn test_stop_when_not_running() {
     let _ = std::fs::remove_file(pid_file_path());
 
+    if service_installed() {
+        // Service lifecycle tests in service-installed environments require root/system setup.
+        // Skip to keep CLI tests hermetic.
+        return;
+    }
+
     cmd()
         .arg("stop")
         .assert()
-        .success()
-        .stdout(contains("not running"));
+        .failure()
+        .stderr(contains("service is not installed"))
+        .stderr(contains("clawshell onboard"));
 }
 
 #[test]

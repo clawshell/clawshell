@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 
 #[cfg(target_os = "linux")]
@@ -18,6 +19,13 @@ pub enum Error {
     #[error("{command} failed to execute: {source}")]
     CommandIo {
         command: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to {operation} '{path}': {source}")]
+    FileIo {
+        operation: &'static str,
+        path: PathBuf,
         #[source]
         source: std::io::Error,
     },

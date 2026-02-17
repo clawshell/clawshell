@@ -18,7 +18,7 @@ use clap::Parser;
 use std::error::Error;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::signal;
 use tracing::{debug, info, warn};
 
@@ -99,6 +99,48 @@ fn ensure_default_config_migrated_if_present() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn canonicalize_or_original(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    canonicalize_or_original(left) == canonicalize_or_original(right)
+}
+
+fn ensure_service_installed_for_lifecycle() -> Result<(), Box<dyn Error>> {
+    if platform::service_exists()? {
+        return Ok(());
+    }
+
+    Err(format!(
+        "ClawShell service is not installed at '{}'. Run 'sudo clawshell onboard' to install it.",
+        onboard::autostart_service_path()
+    )
+    .into())
+}
+
+fn ensure_service_config_matches(requested_config: &Path) -> Result<(), Box<dyn Error>> {
+    ensure_service_installed_for_lifecycle()?;
+
+    let configured = platform::service_config_path()?.ok_or_else(|| {
+        format!(
+            "Could not determine service config path from '{}'. Reinstall the service with 'sudo clawshell onboard'.",
+            onboard::autostart_service_path()
+        )
+    })?;
+
+    if paths_equivalent(&configured, requested_config) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Service is configured with '{}', but command requested '{}'. Reinstall the auto-start service to change the config path.",
+        configured.display(),
+        requested_config.display()
+    )
+    .into())
+}
+
 fn print_migration_status(path: &str, status: &VersionGateStatus) {
     match status {
         VersionGateStatus::Current(version) => {
@@ -149,7 +191,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn cmd_start(config_path: &str, foreground: bool) -> Result<(), Box<dyn std::error::Error>> {
     tui::print_banner("Start");
-    cmd_start_inner(config_path, foreground).await
+    if foreground {
+        return cmd_start_inner(config_path, true).await;
+    }
+
+    let path = PathBuf::from(config_path);
+    ensure_config_migrated(&path)?;
+    Config::from_file(&path)
+        .map_err(|e| format!("Failed to load configuration from '{}': {}", config_path, e))?;
+    ensure_service_config_matches(&path)?;
+
+    tui::print_info("Config", config_path);
+    println!("Starting ClawShell via service manager...");
+    platform::service_start()?;
+    tui::print_success("ClawShell started successfully.");
+    tui::print_info("Logs", &process::log_file_path().display().to_string());
+    Ok(())
 }
 
 async fn cmd_start_inner(
@@ -265,48 +322,47 @@ async fn cmd_start_inner(
 fn cmd_stop() -> Result<(), Box<dyn std::error::Error>> {
     tui::print_banner("Stop");
     ensure_default_config_migrated_if_present()?;
+    ensure_service_installed_for_lifecycle()?;
 
-    match process::read_pid_file() {
-        Some(pid) => {
-            if !process::is_process_running(pid) {
-                tui::print_warning(&format!(
-                    "ClawShell is not running (stale PID file for PID: {pid})"
-                ));
-                process::remove_pid_file();
-                return Ok(());
-            }
-            tui::print_info("PID", &pid.to_string());
-            println!("Stopping ClawShell...");
-            process::stop_process(pid)?;
-            tui::print_success("ClawShell stopped successfully.");
-            tui::print_info("Logs", &process::log_file_path().display().to_string());
-        }
-        None => {
-            tui::print_warning("ClawShell is not running.");
-        }
+    if !platform::service_is_running()? {
+        tui::print_warning("ClawShell is not running.");
+        return Ok(());
     }
+
+    println!("Stopping ClawShell via service manager...");
+    platform::service_stop()?;
+    tui::print_success("ClawShell stopped successfully.");
+    if let Some(pid) = process::read_pid_file()
+        && !process::is_process_running(pid)
+    {
+        process::remove_pid_file();
+    }
+    tui::print_info("Logs", &process::log_file_path().display().to_string());
     Ok(())
 }
 
 fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
     tui::print_banner("Status");
+    ensure_service_installed_for_lifecycle()?;
 
-    match process::read_pid_file() {
-        Some(pid) => {
-            if process::is_process_running(pid) {
-                tui::print_success(&format!("ClawShell is running (PID: {pid})"));
-                if let Some(uptime) = process::get_process_uptime(pid) {
-                    tui::print_info("Uptime", &uptime);
-                }
-            } else {
-                tui::print_warning(&format!(
-                    "ClawShell is not running (stale PID file for PID: {pid})"
-                ));
-                process::remove_pid_file();
+    if platform::service_is_running()? {
+        if let Some(pid) = process::read_pid_file()
+            && process::is_process_running(pid)
+        {
+            tui::print_success(&format!("ClawShell is running (PID: {pid})"));
+            if let Some(uptime) = process::get_process_uptime(pid) {
+                tui::print_info("Uptime", &uptime);
             }
+            return Ok(());
         }
-        None => {
-            tui::print_warning("ClawShell is not running.");
+
+        tui::print_success("ClawShell is running.");
+    } else {
+        tui::print_warning("ClawShell is not running.");
+        if let Some(pid) = process::read_pid_file()
+            && !process::is_process_running(pid)
+        {
+            process::remove_pid_file();
         }
     }
     Ok(())
@@ -314,26 +370,18 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn cmd_restart(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     tui::print_banner("Restart");
-    ensure_config_migrated(&PathBuf::from(config_path))?;
+    let path = PathBuf::from(config_path);
+    ensure_config_migrated(&path)?;
+    Config::from_file(&path)
+        .map_err(|e| format!("Failed to load configuration from '{}': {}", config_path, e))?;
+    ensure_service_config_matches(&path)?;
 
-    // Stop if running
-    if let Some(pid) = process::read_pid_file() {
-        if process::is_process_running(pid) {
-            tui::print_info("PID", &pid.to_string());
-            println!("Stopping ClawShell...");
-            process::stop_process(pid)?;
-            tui::print_success("ClawShell stopped.");
-            // Wait briefly for the OS to release the port
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        } else {
-            process::remove_pid_file();
-        }
-    }
-
-    // Start with latest config
     tui::print_info("Config", config_path);
-    println!("Starting ClawShell...");
-    cmd_start_inner(config_path, false).await
+    println!("Restarting ClawShell via service manager...");
+    platform::service_restart()?;
+    tui::print_success("ClawShell restarted successfully.");
+    tui::print_info("Logs", &process::log_file_path().display().to_string());
+    Ok(())
 }
 
 async fn cmd_logs(
