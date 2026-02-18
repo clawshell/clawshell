@@ -1,11 +1,5 @@
-use crate::platform;
-use nix::sys::signal::{self, Signal};
-use nix::unistd::{Gid, Pid, Uid, User, getuid, setgid, setuid};
-use nix::unistd::{SysconfVar, sysconf};
-use std::fs;
-use std::io::Write as _;
+use nix::unistd::{Gid, Uid, User, getuid, setgid, setuid};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
 use vfs::VfsPath;
 
@@ -22,21 +16,9 @@ pub(crate) fn physical_root() -> VfsPath {
     VfsPath::new(vfs::PhysicalFS::new("/"))
 }
 
-/// PID file path within a VFS root.
-fn pid_file_vfs(root: &VfsPath) -> Result<VfsPath, Box<dyn std::error::Error>> {
-    Ok(root.join(platform::pid_file_vfs_rel_path())?)
-}
-
 /// Log file path within a VFS root.
 fn log_file_vfs(root: &VfsPath) -> Result<VfsPath, Box<dyn std::error::Error>> {
     Ok(root.join("var/log/clawshell/clawshell.log")?)
-}
-
-/// PID file location.
-/// - Linux: /run/clawshell/clawshell.pid
-/// - macOS: /var/run/clawshell.pid (flat, no subdirectory since /var/run is a symlink to /private/var/run)
-pub fn pid_file_path() -> PathBuf {
-    PathBuf::from(platform::pid_file_abs_path())
 }
 
 /// Log file location.
@@ -46,91 +28,16 @@ pub fn log_file_path() -> PathBuf {
     PathBuf::from("/var/log/clawshell/clawshell.log")
 }
 
-/// Ensure the parent directories for PID and log files exist (VFS variant).
+/// Ensure the parent directories for log files exist (VFS variant).
 pub(crate) fn ensure_runtime_dirs_vfs(root: &VfsPath) -> Result<(), Box<dyn std::error::Error>> {
-    let pid_path = pid_file_vfs(root)?;
-    pid_path.parent().create_dir_all()?;
     let log_path = log_file_vfs(root)?;
     log_path.parent().create_dir_all()?;
     Ok(())
 }
 
-/// Ensure the parent directories for PID and log files exist.
+/// Ensure the parent directories for log files exist.
 pub fn ensure_runtime_dirs() -> Result<(), Box<dyn std::error::Error>> {
     ensure_runtime_dirs_vfs(&physical_root())
-}
-
-/// Write a PID file (VFS variant).
-pub(crate) fn write_pid_file_vfs(
-    root: &VfsPath,
-    pid: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let path = pid_file_vfs(root)?;
-    path.create_file()?.write_all(pid.to_string().as_bytes())?;
-    Ok(())
-}
-
-pub fn write_pid_file(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
-    write_pid_file_vfs(&physical_root(), pid)
-}
-
-/// Read the PID from the PID file (VFS variant).
-pub(crate) fn read_pid_file_vfs(root: &VfsPath) -> Option<u32> {
-    let path = pid_file_vfs(root).ok()?;
-    path.read_to_string().ok()?.trim().parse().ok()
-}
-
-pub fn read_pid_file() -> Option<u32> {
-    read_pid_file_vfs(&physical_root())
-}
-
-/// Remove the PID file (VFS variant).
-pub(crate) fn remove_pid_file_vfs(root: &VfsPath) {
-    if let Ok(path) = pid_file_vfs(root) {
-        let _ = path.remove_file();
-    }
-}
-
-pub fn remove_pid_file() {
-    remove_pid_file_vfs(&physical_root())
-}
-
-fn to_pid(pid: u32) -> Result<Pid, Box<dyn std::error::Error>> {
-    let raw: i32 = pid
-        .try_into()
-        .map_err(|_| format!("PID {} exceeds i32::MAX", pid))?;
-    Ok(Pid::from_raw(raw))
-}
-
-pub fn is_process_running(pid: u32) -> bool {
-    to_pid(pid)
-        .map(|p| signal::kill(p, None).is_ok())
-        .unwrap_or(false)
-}
-
-pub fn stop_process(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
-    let nix_pid = to_pid(pid)?;
-    signal::kill(nix_pid, Signal::SIGTERM)
-        .map_err(|e| format!("Failed to send SIGTERM to process {}: {}", pid, e))?;
-
-    // Wait for the process to exit (up to 10 seconds)
-    for _ in 0..100 {
-        if !is_process_running(pid) {
-            remove_pid_file();
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
-    // Force kill if still running
-    eprintln!(
-        "Process {} did not stop gracefully, sending SIGKILL...",
-        pid
-    );
-    signal::kill(nix_pid, Signal::SIGKILL)
-        .map_err(|e| format!("Failed to send SIGKILL to process {}: {}", pid, e))?;
-    remove_pid_file();
-    Ok(())
 }
 
 /// Drop privileges from root to the `clawshell` system user.
@@ -157,86 +64,9 @@ pub fn drop_privileges() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub fn get_process_uptime(pid: u32) -> Option<String> {
-    let stat_path = format!("/proc/{}/stat", pid);
-    let stat = fs::read_to_string(&stat_path).ok()?;
-    let boot_time = get_boot_time()?;
-    let fields: Vec<&str> = stat.split_whitespace().collect();
-    // Field 21 (0-indexed) is starttime in clock ticks
-    let start_ticks: u64 = fields.get(21)?.parse().ok()?;
-    let ticks_per_sec: u64 = sysconf(SysconfVar::CLK_TCK).ok()?? as u64;
-    let start_secs = boot_time + start_ticks / ticks_per_sec;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let uptime_secs = now.saturating_sub(start_secs);
-    Some(format_duration(uptime_secs))
-}
-
-fn get_boot_time() -> Option<u64> {
-    let stat = fs::read_to_string("/proc/stat").ok()?;
-    for line in stat.lines() {
-        if let Some(rest) = line.strip_prefix("btime ") {
-            return rest.trim().parse().ok();
-        }
-    }
-    None
-}
-
-fn format_duration(secs: u64) -> String {
-    let days = secs / 86400;
-    let hours = (secs % 86400) / 3600;
-    let minutes = (secs % 3600) / 60;
-    let seconds = secs % 60;
-
-    if days > 0 {
-        format!("{}d {}h {}m {}s", days, hours, minutes, seconds)
-    } else if hours > 0 {
-        format!("{}h {}m {}s", hours, minutes, seconds)
-    } else if minutes > 0 {
-        format!("{}m {}s", minutes, seconds)
-    } else {
-        format!("{}s", seconds)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-    use std::process;
-    use vfs::MemoryFS;
-
-    #[test]
-    fn test_format_duration_seconds() {
-        assert_eq!(format_duration(42), "42s");
-    }
-
-    #[test]
-    fn test_format_duration_minutes() {
-        assert_eq!(format_duration(125), "2m 5s");
-    }
-
-    #[test]
-    fn test_format_duration_hours() {
-        assert_eq!(format_duration(3661), "1h 1m 1s");
-    }
-
-    #[test]
-    fn test_format_duration_days() {
-        assert_eq!(format_duration(90061), "1d 1h 1m 1s");
-    }
-
-    #[test]
-    fn test_pid_file_path() {
-        let path = pid_file_path();
-        let path_str = path.to_str().unwrap();
-        assert!(path_str.contains("clawshell.pid"));
-        // Should be under /run or /var/run, not /tmp
-        assert!(
-            path_str.starts_with("/run/") || path_str.starts_with("/var/run"),
-            "PID path should be under /run or /var/run, got: {}",
-            path_str
-        );
-    }
 
     #[test]
     fn test_log_file_path() {
@@ -258,129 +88,12 @@ mod tests {
     }
 
     #[test]
-    fn test_write_and_read_pid_file() {
-        let root = VfsPath::new(MemoryFS::new());
-        ensure_runtime_dirs_vfs(&root).unwrap();
-
-        let test_pid = 12345u32;
-        write_pid_file_vfs(&root, test_pid).unwrap();
-        let read_pid = read_pid_file_vfs(&root).unwrap();
-        assert_eq!(read_pid, test_pid);
-
-        remove_pid_file_vfs(&root);
-        assert!(read_pid_file_vfs(&root).is_none());
-    }
-
-    #[test]
-    fn test_is_process_running_self() {
-        let pid = process::id();
-        assert!(is_process_running(pid));
-    }
-
-    #[test]
-    fn test_is_process_running_nonexistent() {
-        // PID 99999999 should not exist
-        assert!(!is_process_running(99999999));
-    }
-
-    #[test]
     fn test_ensure_runtime_dirs() {
-        let root = VfsPath::new(MemoryFS::new());
+        let root = VfsPath::new(vfs::MemoryFS::new());
         ensure_runtime_dirs_vfs(&root).unwrap();
 
-        let pid_parent = pid_file_vfs(&root).unwrap().parent();
-        assert!(pid_parent.exists().unwrap());
         let log_parent = log_file_vfs(&root).unwrap().parent();
         assert!(log_parent.exists().unwrap());
-    }
-
-    #[test]
-    fn test_get_process_uptime_self() {
-        let pid = process::id();
-        // On Linux with /proc, this should return Some
-        if Path::new("/proc/self/stat").exists() {
-            let uptime = get_process_uptime(pid);
-            assert!(uptime.is_some(), "Should be able to get uptime for self");
-            let uptime_str = uptime.unwrap();
-            // Should be a valid duration string (ends with 's')
-            assert!(
-                uptime_str.ends_with('s'),
-                "Uptime should end with 's': {}",
-                uptime_str
-            );
-        }
-    }
-
-    #[test]
-    fn test_get_process_uptime_nonexistent() {
-        let uptime = get_process_uptime(99999999);
-        assert!(uptime.is_none());
-    }
-
-    #[test]
-    fn test_get_boot_time() {
-        if Path::new("/proc/stat").exists() {
-            let boot_time = get_boot_time();
-            assert!(
-                boot_time.is_some(),
-                "Should be able to read boot time from /proc/stat"
-            );
-            assert!(boot_time.unwrap() > 0);
-        }
-    }
-
-    #[test]
-    fn test_stop_process_nonexistent() {
-        // Stopping a nonexistent process should fail with an error
-        let result = stop_process(99999999);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_stop_process_spawned_child() {
-        // Spawn a sleep process and then stop it
-        let child = process::Command::new("sleep").arg("60").spawn();
-        if let Ok(mut child) = child {
-            let pid = child.id();
-            assert!(is_process_running(pid));
-            let result = stop_process(pid);
-            assert!(result.is_ok());
-            // Wait for the child to be reaped
-            let _ = child.wait();
-        }
-    }
-
-    #[test]
-    fn test_format_duration_zero() {
-        assert_eq!(format_duration(0), "0s");
-    }
-
-    #[test]
-    fn test_format_duration_exactly_one_hour() {
-        assert_eq!(format_duration(3600), "1h 0m 0s");
-    }
-
-    #[test]
-    fn test_format_duration_exactly_one_day() {
-        assert_eq!(format_duration(86400), "1d 0h 0m 0s");
-    }
-
-    #[test]
-    fn test_to_pid_valid() {
-        let pid = to_pid(1234).unwrap();
-        assert_eq!(pid.as_raw(), 1234);
-    }
-
-    #[test]
-    fn test_to_pid_max_i32() {
-        let pid = to_pid(i32::MAX as u32).unwrap();
-        assert_eq!(pid.as_raw(), i32::MAX);
-    }
-
-    #[test]
-    fn test_to_pid_overflow() {
-        let result = to_pid(u32::MAX);
-        assert!(result.is_err());
     }
 
     #[test]
