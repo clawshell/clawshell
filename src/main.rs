@@ -229,6 +229,30 @@ fn align_owner_with_openclaw_path(
     Ok(true)
 }
 
+fn print_openclaw_recovery_notice(openclaw_path: &Path, backup_path: &Path) {
+    let bak = backup_path.display().to_string();
+    let orig = openclaw_path.display().to_string();
+    let mut lines = vec![
+        "If anything goes wrong, restore from the backup:".to_string(),
+        String::new(),
+        format!("  $ sudo chmod 600 {bak}"),
+        format!("  $ sudo cp {bak} {orig}"),
+        format!("  $ sudo chmod 600 {orig}"),
+    ];
+
+    // Check if numbered backups exist and explain the scheme
+    let bak1 = openclaw_path.with_file_name("openclaw.json.clawshell.bak.1");
+    if bak1.exists() {
+        lines.push(String::new());
+        lines.push("Multiple backups exist — higher numbers are more recent.".to_string());
+        lines.push("All backups are owned by 'clawshell' with mode 000 (no access).".to_string());
+        lines.push("OpenClaw cannot read them — use sudo to restore.".to_string());
+    }
+
+    let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    tui::print_callout("Recovery", &line_refs);
+}
+
 fn ensure_service_installed_for_lifecycle() -> Result<(), Box<dyn Error>> {
     if platform::service_exists()? {
         return Ok(());
@@ -879,22 +903,21 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
 
     // Step 7: Backup OpenClaw configuration file if present.
     tui::print_step(7, TOTAL_STEPS, "Backing up OpenClaw configuration...");
-    let actual_backup_path = if openclaw_path.exists() {
+    if openclaw_path.exists() {
         let backup = onboard::backup_openclaw_config(openclaw_path)?;
         tui::print_step_done(7, TOTAL_STEPS, "OpenClaw config backed up");
         tui::print_info("Backup", &backup.display().to_string());
-        Some(backup)
+        print_openclaw_recovery_notice(openclaw_path, &backup);
     } else {
         tui::print_step_done(7, TOTAL_STEPS, "OpenClaw config backup skipped");
         tui::print_warning(&format!(
             "OpenClaw config not found at: {}",
             openclaw_path.display()
         ));
-        None
-    };
+    }
 
     // Step 8: Update OpenClaw configuration via OpenClaw CLI.
-    tui::print_step(8, TOTAL_STEPS, "Updating OpenClaw configuration...");
+    tui::print_step(8, TOTAL_STEPS, "");
     let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
     openclaw_cli::apply_onboard_openclaw_config(&mut openclaw_runner, &ob_config)?;
     if let Some(skill_path) = openclaw_skill_path.as_ref() {
@@ -1064,31 +1087,6 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
             "Skipped",
             "You can restart later with: openclaw gateway restart",
         );
-    }
-
-    // Recovery instructions notice
-    if let Some(ref backup_path) = actual_backup_path {
-        let bak = backup_path.display().to_string();
-        let orig = openclaw_path.display().to_string();
-        let mut lines = vec![
-            "If anything goes wrong, restore from the backup:".to_string(),
-            String::new(),
-            format!("  $ sudo chmod 600 {bak}"),
-            format!("  $ sudo cp {bak} {orig}"),
-            format!("  $ sudo chmod 600 {orig}"),
-        ];
-        // Check if numbered backups exist and explain the scheme
-        let bak1 = openclaw_path.with_file_name("openclaw.json.clawshell.bak.1");
-        if bak1.exists() {
-            lines.push(String::new());
-            lines.push("Multiple backups exist — higher numbers are more recent.".to_string());
-            lines.push(
-                "All backups are owned by 'clawshell' with mode 000 (no access).".to_string(),
-            );
-            lines.push("OpenClaw cannot read them — use sudo to restore.".to_string());
-        }
-        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        tui::print_callout("Recovery", &line_refs);
     }
 
     Ok(())
