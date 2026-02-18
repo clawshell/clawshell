@@ -52,14 +52,13 @@ patterns = [
     { name = "amex_card",       regex = '\b3[47][0-9]{13}\b',                                           action = "redact" },
 ]
 
-# Gmail read endpoint (GET /v1/gmail/messages)
+# Email read endpoint
 # If enabled, set exactly one mode:
 # - mode = "allowlist" with non-empty allow_senders and empty deny_senders
 # - mode = "denylist" with non-empty deny_senders and empty allow_senders
-[gmail]
+[email]
 enabled = false
 default_max_results = 50
-api_base_url = "https://gmail.googleapis.com/"
 
 # mode = "allowlist"
 # allow_senders = ["alice@example.com", "@trusted.org"]
@@ -98,8 +97,12 @@ api_base_url = "https://gmail.googleapis.com/"
 #   "@welcome.aexp.com",
 # ]
 
-# [[gmail.accounts]]
-# virtual_key = "vk-gmail-001"
-# refresh_token = "1//long-lived-refresh-token"
-# client_secret_file = "/etc/clawshell/oauth/client_secret.json"
-# user_id = "me"
+# [[email.accounts]]
+# virtual_key = "vk-email-001"
+# email = "bot@gmail.com"
+# app_password = "abcd efgh ijkl mnop"
+# imap_host = "imap.gmail.com"
+# For Outlook preset, use:
+# imap_host = "imap-mail.outlook.com"
+# For other providers, enter the provider IMAP host manually.
+# imap_port = 993

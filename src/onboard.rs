@@ -1,24 +1,37 @@
+use crate::email::{EmailAccountCredentials, ImapEmailService};
 use crate::platform;
 use crate::tui;
 
-use reqwest::StatusCode;
-use reqwest::Url;
-use reqwest::blocking::Client as BlockingHttpClient;
-use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::warn;
 use vfs::VfsPath;
 
-const GOOGLE_DEFAULT_AUTH_URI: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_DEVICE_AUTH_URI: &str = "https://oauth2.googleapis.com/device/code";
-const GOOGLE_DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
-const GOOGLE_DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
-const GOOGLE_DEFAULT_REDIRECT_URI: &str = "urn:ietf:wg:oauth:2.0:oob";
-const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
-const GOOGLE_DEFAULT_DEVICE_CODE_INTERVAL_SECONDS: u64 = 5;
-const GOOGLE_DEVICE_CODE_SLOWDOWN_SECONDS: u64 = 5;
+const EMAIL_PROVIDER_PRESET_GMAIL: &str = "Gmail (imap.gmail.com:993)";
+const EMAIL_PROVIDER_PRESET_OUTLOOK: &str = "Outlook (imap-mail.outlook.com:993)";
+const EMAIL_PROVIDER_PRESET_OTHER: &str = "Other (manual IMAP host/port)";
+const EMAIL_DEFAULT_GMAIL_IMAP_HOST: &str = "imap.gmail.com";
+const EMAIL_DEFAULT_OUTLOOK_IMAP_HOST: &str = "imap-mail.outlook.com";
+const EMAIL_DEFAULT_IMAP_PORT: u16 = 993;
+const EMAIL_IMAP_VALIDATE_TIMEOUT_SECONDS: u64 = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmailImapProviderPreset {
+    Gmail,
+    Outlook,
+    Other,
+}
+
+impl EmailImapProviderPreset {
+    fn label(self) -> &'static str {
+        match self {
+            EmailImapProviderPreset::Gmail => EMAIL_PROVIDER_PRESET_GMAIL,
+            EmailImapProviderPreset::Outlook => EMAIL_PROVIDER_PRESET_OUTLOOK,
+            EmailImapProviderPreset::Other => EMAIL_PROVIDER_PRESET_OTHER,
+        }
+    }
+}
 
 /// API keys detected from an existing OpenClaw installation.
 #[derive(Debug, Default)]
@@ -203,19 +216,19 @@ pub struct OnboardConfig {
     pub openclaw_config_path: PathBuf,
     pub server_host: String,
     pub server_port: u16,
-    pub gmail: Option<OnboardGmailConfig>,
+    pub email: Option<OnboardEmailConfig>,
 }
 
-/// Optional Gmail endpoint settings collected during onboarding.
+/// Optional Email endpoint settings collected during onboarding.
 #[derive(Debug, Clone)]
-pub struct OnboardGmailConfig {
-    pub mode: OnboardGmailMode,
+pub struct OnboardEmailConfig {
+    pub mode: OnboardEmailMode,
     pub sender_rules: Vec<String>,
     pub account_virtual_key: String,
-    pub user_id: String,
-    pub refresh_token: String,
-    pub client_secret_file: String,
-    pub client_secret_json: String,
+    pub email: String,
+    pub app_password: String,
+    pub imap_host: String,
+    pub imap_port: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -230,102 +243,20 @@ pub struct OnboardSkillBundle {
     pub files: Vec<OnboardSkillFile>,
 }
 
-pub const OPENCLAW_GMAIL_MESSAGES_SKILL_NAME: &str = "get-gmail-messages";
+pub const OPENCLAW_EMAIL_MESSAGES_SKILL_NAME: &str = "get-email-messages";
 
-#[derive(Debug, Deserialize)]
-struct GoogleOAuthClientSecretsFile {
-    #[serde(default)]
-    installed: Option<GoogleOAuthClientEntry>,
-    #[serde(default)]
-    web: Option<GoogleOAuthClientEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GoogleOAuthClientEntry {
-    #[serde(default)]
-    client_id: Option<String>,
-    #[serde(default)]
-    client_secret: Option<String>,
-    #[serde(default)]
-    auth_uri: Option<String>,
-    #[serde(default)]
-    token_uri: Option<String>,
-    #[serde(default)]
-    redirect_uris: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone)]
-struct GoogleOAuthClientConfig {
-    client_id: String,
-    client_secret: String,
-    auth_uri: String,
-    token_uri: String,
-    redirect_uri: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct GoogleTokenExchangeResponse {
-    #[serde(default)]
-    refresh_token: Option<String>,
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    error_description: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GoogleOAuthErrorResponse {
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    error_description: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GoogleDeviceCodeResponse {
-    #[serde(default)]
-    device_code: Option<String>,
-    #[serde(default)]
-    user_code: Option<String>,
-    #[serde(default)]
-    verification_uri: Option<String>,
-    #[serde(default)]
-    verification_url: Option<String>,
-    #[serde(default)]
-    verification_uri_complete: Option<String>,
-    #[serde(default)]
-    expires_in: Option<u64>,
-    #[serde(default)]
-    interval: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-struct GoogleDeviceCodeSession {
-    device_code: String,
-    user_code: String,
-    verification_uri: String,
-    verification_uri_complete: Option<String>,
-    expires_in_seconds: u64,
-    interval_seconds: u64,
-}
-
-enum DeviceFlowError {
-    Unavailable(String),
-    Failed(String),
-}
-
-/// Sender filtering mode for the Gmail endpoint.
+/// Sender filtering mode for the Email endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnboardGmailMode {
+pub enum OnboardEmailMode {
     Allowlist,
     Denylist,
 }
 
-impl OnboardGmailMode {
+impl OnboardEmailMode {
     fn as_toml_value(self) -> &'static str {
         match self {
-            OnboardGmailMode::Allowlist => "allowlist",
-            OnboardGmailMode::Denylist => "denylist",
+            OnboardEmailMode::Allowlist => "allowlist",
+            OnboardEmailMode::Denylist => "denylist",
         }
     }
 }
@@ -377,7 +308,7 @@ fn load_existing_config_from_vfs(config_dir: &VfsPath) -> Option<ExistingConfig>
             .map(String::from);
     }
 
-    // Read clawshell.toml for server host/port and optional Gmail settings
+    // Read clawshell.toml for server host/port and optional Email settings
     if let Ok(content) = toml_file.read_to_string()
         && let Ok(toml) = content.parse::<toml::Table>()
     {
@@ -392,51 +323,55 @@ fn load_existing_config_from_vfs(config_dir: &VfsPath) -> Option<ExistingConfig>
                 .map(|p| p.to_string());
         }
 
-        if let Some(gmail) = toml.get("gmail").and_then(|g| g.as_table()) {
-            existing.gmail_enabled = gmail.get("enabled").and_then(|v| v.as_bool());
-            existing.gmail_mode = gmail
+        if let Some(email) = toml.get("email").and_then(|g| g.as_table()) {
+            existing.email_enabled = email.get("enabled").and_then(|v| v.as_bool());
+            existing.email_mode = email
                 .get("mode")
                 .and_then(|v| v.as_str())
-                .and_then(parse_gmail_mode);
+                .and_then(parse_email_mode);
 
-            let allow_rules = gmail
+            let allow_rules = email
                 .get("allow_senders")
                 .and_then(|v| v.as_array())
                 .map(|values| parse_string_array(values))
                 .unwrap_or_default();
-            let deny_rules = gmail
+            let deny_rules = email
                 .get("deny_senders")
                 .and_then(|v| v.as_array())
                 .map(|values| parse_string_array(values))
                 .unwrap_or_default();
-            existing.gmail_sender_rules = if !allow_rules.is_empty() {
+            existing.email_sender_rules = if !allow_rules.is_empty() {
                 allow_rules
             } else {
                 deny_rules
             };
 
-            if let Some(account) = select_existing_gmail_account(
-                gmail
+            if let Some(account) = select_existing_email_account(
+                email
                     .get("accounts")
                     .and_then(|v| v.as_array().map(Vec::as_slice)),
                 existing.virtual_api_key.as_deref(),
             ) {
-                existing.gmail_account_virtual_key = account
+                existing.email_account_virtual_key = account
                     .get("virtual_key")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                existing.gmail_user_id = account
-                    .get("user_id")
+                existing.email_email = account
+                    .get("email")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                existing.gmail_refresh_token = account
-                    .get("refresh_token")
+                existing.email_app_password = account
+                    .get("app_password")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                existing.gmail_client_secret_file = account
-                    .get("client_secret_file")
+                existing.email_imap_host = account
+                    .get("imap_host")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                existing.email_imap_port = account
+                    .get("imap_port")
+                    .and_then(|v| v.as_integer())
+                    .and_then(|value| u16::try_from(value).ok());
             }
         }
     }
@@ -448,10 +383,10 @@ fn load_existing_config_from_vfs(config_dir: &VfsPath) -> Option<ExistingConfig>
     }
 }
 
-fn parse_gmail_mode(value: &str) -> Option<OnboardGmailMode> {
+fn parse_email_mode(value: &str) -> Option<OnboardEmailMode> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "allowlist" => Some(OnboardGmailMode::Allowlist),
-        "denylist" => Some(OnboardGmailMode::Denylist),
+        "allowlist" => Some(OnboardEmailMode::Allowlist),
+        "denylist" => Some(OnboardEmailMode::Denylist),
         _ => None,
     }
 }
@@ -464,546 +399,74 @@ fn parse_string_array(values: &[toml::Value]) -> Vec<String> {
         .collect()
 }
 
-fn parse_google_oauth_client_config(content: &str) -> Result<GoogleOAuthClientConfig, String> {
-    let parsed: GoogleOAuthClientSecretsFile =
-        serde_json::from_str(content).map_err(|e| format!("invalid JSON: {e}"))?;
-    let oauth_entry = parsed
-        .installed
-        .or(parsed.web)
-        .ok_or("must contain an 'installed' or 'web' object".to_string())?;
-    let client_id = oauth_entry
-        .client_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or("missing non-empty client_id under 'installed' or 'web'".to_string())?
-        .to_string();
-    let client_secret = oauth_entry
-        .client_secret
-        .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let auth_uri = oauth_entry
-        .auth_uri
-        .as_deref()
-        .unwrap_or(GOOGLE_DEFAULT_AUTH_URI)
-        .trim()
-        .to_string();
-    let token_uri = oauth_entry
-        .token_uri
-        .as_deref()
-        .unwrap_or(GOOGLE_DEFAULT_TOKEN_URI)
-        .trim()
-        .to_string();
-    let redirect_uri = oauth_entry
-        .redirect_uris
-        .as_deref()
-        .unwrap_or(&[])
-        .iter()
-        .map(|value| value.trim())
-        .find(|value| !value.is_empty())
-        .unwrap_or(GOOGLE_DEFAULT_REDIRECT_URI)
-        .to_string();
+fn infer_imap_provider_preset(imap_host: Option<&str>) -> EmailImapProviderPreset {
+    let Some(host) = imap_host else {
+        return EmailImapProviderPreset::Gmail;
+    };
 
-    Url::parse(&auth_uri).map_err(|e| format!("invalid auth_uri '{auth_uri}': {e}"))?;
-    Url::parse(&token_uri).map_err(|e| format!("invalid token_uri '{token_uri}': {e}"))?;
-
-    Ok(GoogleOAuthClientConfig {
-        client_id,
-        client_secret,
-        auth_uri,
-        token_uri,
-        redirect_uri,
-    })
-}
-
-fn parse_google_oauth_error_response(body: &str) -> Option<GoogleOAuthErrorResponse> {
-    let parsed: GoogleOAuthErrorResponse = serde_json::from_str(body).ok()?;
-    if parsed.error.is_none() && parsed.error_description.is_none() {
-        return None;
-    }
-    Some(parsed)
-}
-
-fn format_google_oauth_error_details(
-    status: StatusCode,
-    error: Option<&str>,
-    error_description: Option<&str>,
-    body: &str,
-) -> String {
-    if let Some(error) = error.map(str::trim).filter(|value| !value.is_empty()) {
-        if let Some(detail) = error_description
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return format!("{status}: {error} ({detail})");
-        }
-        return format!("{status}: {error}");
-    }
-
-    let body = body.trim();
-    if body.is_empty() {
-        status.to_string()
-    } else {
-        format!("{status}: {body}")
+    match host.trim().to_ascii_lowercase().as_str() {
+        EMAIL_DEFAULT_GMAIL_IMAP_HOST => EmailImapProviderPreset::Gmail,
+        EMAIL_DEFAULT_OUTLOOK_IMAP_HOST => EmailImapProviderPreset::Outlook,
+        _ => EmailImapProviderPreset::Other,
     }
 }
 
-fn is_device_flow_unavailable_error(
-    status: StatusCode,
-    error: Option<&str>,
-    error_description: Option<&str>,
-) -> bool {
-    if !status.is_client_error() {
-        return false;
-    }
-
-    let error = error
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-
-    match error.as_str() {
-        "unauthorized_client" | "unsupported_grant_type" | "invalid_client" => true,
-        "invalid_request" => {
-            let detail = error_description
-                .map(str::trim)
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            detail.contains("device")
-                || detail.contains("unsupported")
-                || detail.contains("not enabled")
+fn email_imap_provider_options(preferred: EmailImapProviderPreset) -> Vec<&'static str> {
+    let mut options = vec![preferred.label()];
+    for provider in [
+        EmailImapProviderPreset::Gmail,
+        EmailImapProviderPreset::Outlook,
+        EmailImapProviderPreset::Other,
+    ] {
+        if provider != preferred {
+            options.push(provider.label());
         }
-        _ => false,
+    }
+    options
+}
+
+fn parse_imap_provider_choice(choice: &str) -> EmailImapProviderPreset {
+    match choice {
+        EMAIL_PROVIDER_PRESET_GMAIL => EmailImapProviderPreset::Gmail,
+        EMAIL_PROVIDER_PRESET_OUTLOOK => EmailImapProviderPreset::Outlook,
+        EMAIL_PROVIDER_PRESET_OTHER => EmailImapProviderPreset::Other,
+        _ => EmailImapProviderPreset::Gmail,
     }
 }
 
-fn parse_google_device_code_response(body: &str) -> Result<GoogleDeviceCodeSession, String> {
-    let parsed: GoogleDeviceCodeResponse = serde_json::from_str(body)
-        .map_err(|e| format!("invalid device authorization response JSON: {e}"))?;
-
-    let device_code = parsed
-        .device_code
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or("device authorization response missing non-empty device_code".to_string())?
-        .to_string();
-    let user_code = parsed
-        .user_code
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or("device authorization response missing non-empty user_code".to_string())?
-        .to_string();
-    let verification_uri = parsed
-        .verification_uri
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            parsed
-                .verification_url
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        })
-        .ok_or(
-            "device authorization response missing verification_uri/verification_url".to_string(),
-        )?
-        .to_string();
-    let verification_uri_complete = parsed
-        .verification_uri_complete
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string);
-
-    Url::parse(&verification_uri)
-        .map_err(|e| format!("invalid verification_uri '{verification_uri}': {e}"))?;
-    if let Some(url) = verification_uri_complete.as_deref() {
-        Url::parse(url).map_err(|e| format!("invalid verification_uri_complete '{url}': {e}"))?;
-    }
-
-    Ok(GoogleDeviceCodeSession {
-        device_code,
-        user_code,
-        verification_uri,
-        verification_uri_complete,
-        expires_in_seconds: parsed.expires_in.unwrap_or(1800).max(1),
-        interval_seconds: parsed
-            .interval
-            .unwrap_or(GOOGLE_DEFAULT_DEVICE_CODE_INTERVAL_SECONDS)
-            .max(1),
-    })
-}
-
-fn request_google_device_code(
-    oauth: &GoogleOAuthClientConfig,
-) -> Result<GoogleDeviceCodeSession, DeviceFlowError> {
-    let client = BlockingHttpClient::new();
-    let form_fields = [
-        ("client_id", oauth.client_id.as_str()),
-        ("scope", GMAIL_READONLY_SCOPE),
-    ];
-    let response = client
-        .post(GOOGLE_DEVICE_AUTH_URI)
-        .form(&form_fields)
-        .send()
-        .map_err(|e| {
-            DeviceFlowError::Failed(format!("device authorization request failed: {e}"))
-        })?;
-    let status = response.status();
-    let body = response.text().map_err(|e| {
-        DeviceFlowError::Failed(format!(
-            "failed to read device authorization response body: {e}"
-        ))
-    })?;
-    if !status.is_success() {
-        let parsed_error = parse_google_oauth_error_response(&body);
-        let error_code = parsed_error
-            .as_ref()
-            .and_then(|value| value.error.as_deref());
-        let error_description = parsed_error
-            .as_ref()
-            .and_then(|value| value.error_description.as_deref());
-        let detail =
-            format_google_oauth_error_details(status, error_code, error_description, &body);
-        if is_device_flow_unavailable_error(status, error_code, error_description) {
-            return Err(DeviceFlowError::Unavailable(format!(
-                "device authorization endpoint returned {detail}"
-            )));
+fn email_provider_defaults(provider: EmailImapProviderPreset) -> Option<(&'static str, u16)> {
+    match provider {
+        EmailImapProviderPreset::Gmail => {
+            Some((EMAIL_DEFAULT_GMAIL_IMAP_HOST, EMAIL_DEFAULT_IMAP_PORT))
         }
-        return Err(DeviceFlowError::Failed(format!(
-            "device authorization endpoint returned {detail}"
-        )));
-    }
-
-    parse_google_device_code_response(&body).map_err(DeviceFlowError::Failed)
-}
-
-fn poll_google_device_token_for_refresh_token(
-    oauth: &GoogleOAuthClientConfig,
-    session: &GoogleDeviceCodeSession,
-) -> Result<String, String> {
-    let client = BlockingHttpClient::new();
-    let deadline = Instant::now() + Duration::from_secs(session.expires_in_seconds);
-    let mut interval_seconds = session.interval_seconds;
-
-    loop {
-        if Instant::now() >= deadline {
-            return Err(
-                "device authorization timed out before refresh_token was issued".to_string(),
-            );
+        EmailImapProviderPreset::Outlook => {
+            Some((EMAIL_DEFAULT_OUTLOOK_IMAP_HOST, EMAIL_DEFAULT_IMAP_PORT))
         }
-
-        std::thread::sleep(Duration::from_secs(interval_seconds));
-
-        let mut form_fields = vec![
-            ("client_id", oauth.client_id.as_str()),
-            ("device_code", session.device_code.as_str()),
-            ("grant_type", GOOGLE_DEVICE_CODE_GRANT_TYPE),
-        ];
-        if !oauth.client_secret.trim().is_empty() {
-            form_fields.push(("client_secret", oauth.client_secret.as_str()));
-        }
-        let response = client
-            .post(&oauth.token_uri)
-            .form(&form_fields)
-            .send()
-            .map_err(|e| format!("device token polling request failed: {e}"))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .map_err(|e| format!("failed to read device token polling response body: {e}"))?;
-
-        if status.is_success() {
-            let parsed: GoogleTokenExchangeResponse = serde_json::from_str(&body)
-                .map_err(|e| format!("invalid token response JSON: {e}"))?;
-            if let Some(error) = parsed.error.as_deref() {
-                match error {
-                    "authorization_pending" => continue,
-                    "slow_down" => {
-                        interval_seconds =
-                            interval_seconds.saturating_add(GOOGLE_DEVICE_CODE_SLOWDOWN_SECONDS);
-                        continue;
-                    }
-                    _ => {
-                        let detail = parsed
-                            .error_description
-                            .as_deref()
-                            .unwrap_or_default()
-                            .trim();
-                        if detail.is_empty() {
-                            return Err(format!("token endpoint error: {error}"));
-                        }
-                        return Err(format!("token endpoint error: {error} ({detail})"));
-                    }
-                }
-            }
-
-            return parsed
-                .refresh_token
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string)
-                .ok_or(
-                    "token response missing refresh_token; revoke app access in your Google account and try again"
-                        .to_string(),
-                );
-        }
-
-        let parsed_error = parse_google_oauth_error_response(&body);
-        let error_code = parsed_error
-            .as_ref()
-            .and_then(|value| value.error.as_deref());
-        let error_description = parsed_error
-            .as_ref()
-            .and_then(|value| value.error_description.as_deref());
-        match error_code
-            .map(str::trim)
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "authorization_pending" => continue,
-            "slow_down" => {
-                interval_seconds =
-                    interval_seconds.saturating_add(GOOGLE_DEVICE_CODE_SLOWDOWN_SECONDS);
-                continue;
-            }
-            "access_denied" => {
-                let detail = error_description.map(str::trim).unwrap_or_default();
-                if detail.is_empty() {
-                    return Err("device authorization was denied by user".to_string());
-                }
-                return Err(format!("device authorization was denied by user: {detail}"));
-            }
-            "expired_token" => {
-                return Err("device authorization code expired before completion".to_string());
-            }
-            _ => {
-                let detail =
-                    format_google_oauth_error_details(status, error_code, error_description, &body);
-                return Err(format!("token polling endpoint returned {detail}"));
-            }
-        }
+        EmailImapProviderPreset::Other => None,
     }
 }
 
-fn request_gmail_refresh_token_via_device_flow(
-    oauth: &GoogleOAuthClientConfig,
-) -> Result<String, DeviceFlowError> {
-    loop {
-        let session = match request_google_device_code(oauth) {
-            Ok(session) => session,
-            Err(DeviceFlowError::Unavailable(error)) => {
-                return Err(DeviceFlowError::Unavailable(error));
-            }
-            Err(DeviceFlowError::Failed(error)) => {
-                tui::print_warning(&format!(
-                    "Failed to start device authorization flow: {error}"
-                ));
-                let retry = tui::prompt_confirm("Retry device authorization flow?", true)
-                    .map_err(|e| DeviceFlowError::Failed(e.to_string()))?;
-                if retry {
-                    continue;
-                }
-                return Err(DeviceFlowError::Failed(
-                    "Device OAuth flow cancelled before obtaining refresh_token".to_string(),
-                ));
-            }
-        };
+fn validate_email_imap_credentials(
+    email: &str,
+    app_password: &str,
+    imap_host: &str,
+    imap_port: u16,
+) -> Result<(), String> {
+    let credentials = EmailAccountCredentials {
+        email: email.trim().to_string(),
+        app_password: app_password.trim().to_string(),
+        imap_host: imap_host.trim().to_string(),
+        imap_port,
+    };
 
-        if let Some(url) = session.verification_uri_complete.as_deref() {
-            tui::print_info("Google verification URL", url);
-        }
-        tui::print_info("Google verification page", &session.verification_uri);
-        tui::print_info("Google device user_code", &session.user_code);
-        tui::print_warning(
-            "Open the verification URL in any browser-enabled machine, enter the user code, and approve access.",
-        );
-        let wait_hint = format!(
-            "Polling token endpoint for up to {} seconds...",
-            session.expires_in_seconds
-        );
-        tui::print_info("Device OAuth", &wait_hint);
-
-        match poll_google_device_token_for_refresh_token(oauth, &session) {
-            Ok(token) => return Ok(token),
-            Err(error) => {
-                tui::print_warning(&format!("Device authorization failed: {error}"));
-                let retry = tui::prompt_confirm("Retry device authorization flow?", true)
-                    .map_err(|e| DeviceFlowError::Failed(e.to_string()))?;
-                if !retry {
-                    return Err(DeviceFlowError::Failed(
-                        "Device OAuth flow cancelled before obtaining refresh_token".to_string(),
-                    ));
-                }
-            }
-        }
-    }
+    ImapEmailService::validate_credentials_blocking(
+        &credentials,
+        Duration::from_secs(EMAIL_IMAP_VALIDATE_TIMEOUT_SECONDS),
+    )
+    .map_err(|error| error.to_string())
 }
 
-fn request_gmail_refresh_token(oauth: &GoogleOAuthClientConfig) -> Result<String, String> {
-    match request_gmail_refresh_token_via_device_flow(oauth) {
-        Ok(token) => Ok(token),
-        Err(DeviceFlowError::Unavailable(error)) => {
-            tui::print_warning(&format!("Device authorization flow unavailable: {error}"));
-            tui::print_warning(
-                "Falling back to redirect URL/code flow. Open links on another machine if needed.",
-            );
-            request_gmail_refresh_token_via_oauth(oauth)
-        }
-        Err(DeviceFlowError::Failed(error)) => Err(error),
-    }
-}
-
-fn build_google_consent_url(oauth: &GoogleOAuthClientConfig) -> Result<String, String> {
-    let mut url = Url::parse(&oauth.auth_uri)
-        .map_err(|e| format!("invalid OAuth auth_uri '{}': {e}", oauth.auth_uri))?;
-    {
-        let mut query = url.query_pairs_mut();
-        query.append_pair("client_id", &oauth.client_id);
-        query.append_pair("redirect_uri", &oauth.redirect_uri);
-        query.append_pair("response_type", "code");
-        query.append_pair("scope", GMAIL_READONLY_SCOPE);
-        query.append_pair("access_type", "offline");
-        query.append_pair("prompt", "consent");
-    }
-    Ok(url.to_string())
-}
-
-fn extract_google_authorization_code(input: &str) -> Result<String, String> {
-    let input = input.trim();
-    if input.is_empty() {
-        return Err("authorization code input cannot be empty".to_string());
-    }
-
-    if let Ok(url) = Url::parse(input) {
-        let mut code = None;
-        let mut error = None;
-        let mut error_description = None;
-        for (key, value) in url.query_pairs() {
-            match key.as_ref() {
-                "code" => code = Some(value.into_owned()),
-                "error" => error = Some(value.into_owned()),
-                "error_description" => error_description = Some(value.into_owned()),
-                _ => {}
-            }
-        }
-        if let Some(err) = error {
-            let detail = error_description.unwrap_or_default();
-            if detail.is_empty() {
-                return Err(format!("authorization failed: {err}"));
-            }
-            return Err(format!("authorization failed: {err} ({detail})"));
-        }
-        return code
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string)
-            .ok_or("redirect URL is missing non-empty query parameter 'code'".to_string());
-    }
-
-    if input.starts_with("code=") {
-        let synthetic = format!("https://localhost/?{input}");
-        if let Ok(url) = Url::parse(&synthetic) {
-            return extract_google_authorization_code(url.as_str());
-        }
-    }
-
-    Ok(input.to_string())
-}
-
-fn exchange_google_auth_code_for_refresh_token(
-    oauth: &GoogleOAuthClientConfig,
-    code: &str,
-) -> Result<String, String> {
-    let client = BlockingHttpClient::new();
-    let mut form_fields = vec![
-        ("client_id", oauth.client_id.as_str()),
-        ("code", code),
-        ("grant_type", "authorization_code"),
-        ("redirect_uri", oauth.redirect_uri.as_str()),
-    ];
-    if !oauth.client_secret.trim().is_empty() {
-        form_fields.push(("client_secret", oauth.client_secret.as_str()));
-    }
-
-    let response = client
-        .post(&oauth.token_uri)
-        .form(&form_fields)
-        .send()
-        .map_err(|e| format!("token exchange request failed: {e}"))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| format!("failed to read token response body: {e}"))?;
-    if !status.is_success() {
-        return Err(format!("token endpoint returned {status}: {body}"));
-    }
-
-    let parsed: GoogleTokenExchangeResponse =
-        serde_json::from_str(&body).map_err(|e| format!("invalid token response JSON: {e}"))?;
-    if let Some(error) = parsed.error {
-        let detail = parsed.error_description.unwrap_or_default();
-        if detail.is_empty() {
-            return Err(format!("token endpoint error: {error}"));
-        }
-        return Err(format!("token endpoint error: {error} ({detail})"));
-    }
-
-    parsed
-        .refresh_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .ok_or(
-            "token response missing refresh_token; revoke app access in your Google account and try again"
-                .to_string(),
-        )
-}
-
-fn request_gmail_refresh_token_via_oauth(
-    oauth: &GoogleOAuthClientConfig,
-) -> Result<String, String> {
-    let consent_url = build_google_consent_url(oauth)?;
-    tui::print_info("Google consent URL", &consent_url);
-    tui::print_warning(
-        "Open the URL in a browser, approve access, then paste the full redirect URL (preferred) or code.",
-    );
-
-    loop {
-        let input = tui::prompt_text("Paste redirect URL or authorization code", None)
-            .map_err(|e| e.to_string())?;
-        let code = match extract_google_authorization_code(&input) {
-            Ok(code) => code,
-            Err(error) => {
-                tui::print_warning(&format!("Invalid authorization input: {error}"));
-                continue;
-            }
-        };
-
-        match exchange_google_auth_code_for_refresh_token(oauth, &code) {
-            Ok(token) => return Ok(token),
-            Err(error) => {
-                tui::print_warning(&format!("Failed to exchange authorization code: {error}"));
-                let retry = tui::prompt_confirm("Try OAuth exchange again?", true)
-                    .map_err(|e| e.to_string())?;
-                if !retry {
-                    return Err("OAuth flow cancelled before obtaining refresh_token".to_string());
-                }
-            }
-        }
-    }
-}
-
-fn select_existing_gmail_account<'a>(
+fn select_existing_email_account<'a>(
     accounts: Option<&'a [toml::Value]>,
     preferred_virtual_key: Option<&str>,
 ) -> Option<&'a toml::value::Table> {
@@ -1033,13 +496,14 @@ struct ExistingConfig {
     openclaw_config_path: Option<String>,
     server_host: Option<String>,
     server_port: Option<String>,
-    gmail_enabled: Option<bool>,
-    gmail_mode: Option<OnboardGmailMode>,
-    gmail_sender_rules: Vec<String>,
-    gmail_account_virtual_key: Option<String>,
-    gmail_user_id: Option<String>,
-    gmail_refresh_token: Option<String>,
-    gmail_client_secret_file: Option<String>,
+    email_enabled: Option<bool>,
+    email_mode: Option<OnboardEmailMode>,
+    email_sender_rules: Vec<String>,
+    email_account_virtual_key: Option<String>,
+    email_email: Option<String>,
+    email_app_password: Option<String>,
+    email_imap_host: Option<String>,
+    email_imap_port: Option<u16>,
 }
 
 impl ExistingConfig {
@@ -1051,13 +515,14 @@ impl ExistingConfig {
             || self.openclaw_config_path.is_some()
             || self.server_host.is_some()
             || self.server_port.is_some()
-            || self.gmail_enabled.is_some()
-            || self.gmail_mode.is_some()
-            || !self.gmail_sender_rules.is_empty()
-            || self.gmail_account_virtual_key.is_some()
-            || self.gmail_user_id.is_some()
-            || self.gmail_refresh_token.is_some()
-            || self.gmail_client_secret_file.is_some()
+            || self.email_enabled.is_some()
+            || self.email_mode.is_some()
+            || !self.email_sender_rules.is_empty()
+            || self.email_account_virtual_key.is_some()
+            || self.email_email.is_some()
+            || self.email_app_password.is_some()
+            || self.email_imap_host.is_some()
+            || self.email_imap_port.is_some()
     }
 }
 
@@ -1068,21 +533,6 @@ fn parse_sender_rules(input: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase())
         .collect()
-}
-
-fn sender_rule_has_valid_shape(rule: &str) -> bool {
-    if let Some(domain) = rule.strip_prefix('@') {
-        !domain.is_empty() && domain.contains('.') && !domain.contains(' ')
-    } else {
-        let mut parts = rule.split('@');
-        let local = parts.next().unwrap_or_default();
-        let domain = parts.next().unwrap_or_default();
-        parts.next().is_none()
-            && !local.is_empty()
-            && !domain.is_empty()
-            && domain.contains('.')
-            && !rule.contains(' ')
-    }
 }
 
 fn mask_secret(secret: &str) -> String {
@@ -1190,36 +640,36 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
         Some(default_virtual),
     )?;
 
-    tui::print_section("Gmail Configuration");
+    tui::print_section("email configuration");
 
-    let setup_gmail = tui::prompt_confirm(
-        "Configure Gmail sender filtering endpoint (GET /v1/gmail/messages)?",
-        existing.gmail_enabled.unwrap_or(false),
+    let setup_email = tui::prompt_confirm(
+        "Set up email integration to connect to your email service and prevent OpenClaw from seeing sensitive emails by filtering emails by sender?",
+        existing.email_enabled.unwrap_or(false),
     )?;
 
-    let gmail = if setup_gmail {
-        let mode_options = if existing.gmail_mode == Some(OnboardGmailMode::Denylist) {
+    let email = if setup_email {
+        let mode_options = if existing.email_mode == Some(OnboardEmailMode::Denylist) {
             vec!["Denylist", "Allowlist"]
         } else {
             vec!["Allowlist", "Denylist"]
         };
-        let mode_choice = tui::prompt_select("Select Gmail sender filter mode", mode_options)?;
+        let mode_choice = tui::prompt_select("Select email sender filter mode", mode_options)?;
         let mode = match mode_choice {
-            "Denylist" => OnboardGmailMode::Denylist,
-            _ => OnboardGmailMode::Allowlist,
+            "Denylist" => OnboardEmailMode::Denylist,
+            _ => OnboardEmailMode::Allowlist,
         };
 
         let default_sender_rules_owned =
-            if existing.gmail_mode == Some(mode) && !existing.gmail_sender_rules.is_empty() {
-                Some(existing.gmail_sender_rules.join(", "))
+            if existing.email_mode == Some(mode) && !existing.email_sender_rules.is_empty() {
+                Some(existing.email_sender_rules.join(", "))
             } else {
                 None
             };
         let sender_rules_prompt = match mode {
-            OnboardGmailMode::Allowlist => {
+            OnboardEmailMode::Allowlist => {
                 "Enter allow_senders (comma-separated emails or @domain rules)"
             }
-            OnboardGmailMode::Denylist => {
+            OnboardEmailMode::Denylist => {
                 "Enter deny_senders (comma-separated emails or @domain rules)"
             }
         };
@@ -1232,82 +682,225 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
                     Ok(inquire::validator::Validation::Invalid(
                         "Enter at least one sender rule".into(),
                     ))
-                } else if rules.iter().any(|rule| !sender_rule_has_valid_shape(rule)) {
-                    Ok(inquire::validator::Validation::Invalid(
-                        "Sender rules must be full emails or @domain entries".into(),
-                    ))
                 } else {
+                    for rule in rules {
+                        if let Err(error) = crate::config::validate_sender_rule(&rule) {
+                            return Ok(inquire::validator::Validation::Invalid(
+                                format!("Invalid sender rule '{rule}': {error}").into(),
+                            ));
+                        }
+                    }
                     Ok(inquire::validator::Validation::Valid)
                 }
             },
         )?;
         let sender_rules = parse_sender_rules(&sender_rules_input);
 
-        let default_gmail_virtual_key_owned = existing
-            .gmail_account_virtual_key
+        let default_email_virtual_key_owned = existing
+            .email_account_virtual_key
             .clone()
-            .unwrap_or_else(|| virtual_api_key.clone());
+            .unwrap_or_else(|| "{clawshell-virtual-key-email}".to_string());
         let account_virtual_key = tui::prompt_text(
-            "Enter the virtual API key for Gmail endpoint access",
-            Some(&default_gmail_virtual_key_owned),
+            "Enter the virtual API key for email endpoint access",
+            Some(&default_email_virtual_key_owned),
         )?;
         if account_virtual_key.trim().is_empty() {
-            return Err("Gmail virtual API key cannot be empty".into());
+            return Err("email virtual API key cannot be empty".into());
         }
 
-        let default_user_id_owned = existing
-            .gmail_user_id
-            .clone()
-            .unwrap_or_else(|| "me".to_string());
-        let user_id = tui::prompt_text("Enter Gmail user_id", Some(&default_user_id_owned))?;
-        if user_id.trim().is_empty() {
-            return Err("Gmail user_id cannot be empty".into());
+        let preferred_imap_provider =
+            infer_imap_provider_preset(existing.email_imap_host.as_deref());
+        let provider_choice = tui::prompt_select(
+            "Select email IMAP provider",
+            email_imap_provider_options(preferred_imap_provider),
+        )?;
+        let provider = parse_imap_provider_choice(provider_choice);
+
+        let mut imap_host;
+        let mut imap_port;
+        let is_custom_imap_provider;
+
+        if let Some((default_host, default_port)) = email_provider_defaults(provider) {
+            imap_host = default_host.to_string();
+            imap_port = default_port;
+            is_custom_imap_provider = false;
+        } else {
+            let default_custom_imap_host = existing.email_imap_host.as_deref().and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            });
+            let custom_host = tui::prompt_text_validated(
+                "Enter IMAP host",
+                default_custom_imap_host,
+                |input: &str| {
+                    if input.trim().is_empty() {
+                        return Ok(inquire::validator::Validation::Invalid(
+                            "IMAP host cannot be empty".into(),
+                        ));
+                    }
+                    Ok(inquire::validator::Validation::Valid)
+                },
+            )?;
+            let default_custom_imap_port = existing
+                .email_imap_port
+                .unwrap_or(EMAIL_DEFAULT_IMAP_PORT)
+                .to_string();
+            let custom_port = tui::prompt_text_validated(
+                "Enter IMAP port",
+                Some(&default_custom_imap_port),
+                |input: &str| match input.parse::<u16>() {
+                    Ok(port) if port > 0 => Ok(inquire::validator::Validation::Valid),
+                    _ => Ok(inquire::validator::Validation::Invalid(
+                        "Please enter a valid port number (1-65535)".into(),
+                    )),
+                },
+            )?;
+
+            imap_host = custom_host.trim().to_string();
+            imap_port = custom_port.parse::<u16>().unwrap();
+            is_custom_imap_provider = true;
         }
 
-        let client_secret_file = existing
-            .gmail_client_secret_file
-            .clone()
-            .unwrap_or_else(|| "oauth/client_secret.json".to_string());
-        tui::print_info("Gmail OAuth file", &client_secret_file);
-        let (client_secret_json, oauth_client) = loop {
-            let pasted =
-                tui::prompt_multiline("Paste Gmail OAuth client_secret.json content", "EOF")?;
-            if pasted.trim().is_empty() {
-                tui::print_warning("Gmail client_secret.json content cannot be empty.");
-                continue;
-            }
-            match parse_google_oauth_client_config(&pasted) {
-                Ok(oauth_client) => break (pasted, oauth_client),
-                Err(message) => {
-                    tui::print_warning(&format!("Invalid client_secret.json: {message}"));
+        tui::print_info("IMAP server", &format!("{imap_host}:{imap_port}"));
+
+        let default_email = existing.email_email.as_deref().unwrap_or("");
+        let mut email = tui::prompt_text_validated(
+            "Enter email address (e.g. hello@example.com)",
+            if default_email.is_empty() {
+                None
+            } else {
+                Some(default_email)
+            },
+            |input: &str| {
+                let email = input.trim().to_ascii_lowercase();
+                if email.is_empty() {
+                    return Ok(inquire::validator::Validation::Invalid(
+                        "email address cannot be empty".into(),
+                    ));
+                }
+                if email.starts_with('@') || !email.contains('@') {
+                    return Ok(inquire::validator::Validation::Invalid(
+                        "Please enter a full email address".into(),
+                    ));
+                }
+                if let Err(error) = crate::config::validate_sender_rule(&email) {
+                    return Ok(inquire::validator::Validation::Invalid(
+                        format!("Invalid email address: {error}").into(),
+                    ));
+                }
+                Ok(inquire::validator::Validation::Valid)
+            },
+        )?;
+
+        let mut app_password =
+            if let Some(existing_password) = existing.email_app_password.as_deref() {
+                tui::print_info(
+                    "Existing email app password",
+                    &mask_secret(existing_password),
+                );
+                if tui::prompt_confirm("Reuse existing email app password?", true)? {
+                    existing_password.to_string()
+                } else {
+                    tui::prompt_password("Enter email app password (16-character app password)")?
+                }
+            } else {
+                tui::prompt_password("Enter email app password (16-character app password)")?
+            };
+        if app_password.trim().is_empty() {
+            return Err("email app password cannot be empty".into());
+        }
+
+        loop {
+            match validate_email_imap_credentials(&email, &app_password, &imap_host, imap_port) {
+                Ok(()) => {
+                    tui::print_success("email IMAP login validated.");
+                    break;
+                }
+                Err(error) => {
+                    tui::print_warning(&format!("email IMAP login failed: {error}"));
+                    let retry = tui::prompt_confirm(
+                        "Update email credentials and retry IMAP validation?",
+                        true,
+                    )?;
+                    if !retry {
+                        return Err("email IMAP validation failed".into());
+                    }
+
+                    email = tui::prompt_text_validated(
+                        "Enter email address (e.g. hello@example.com)",
+                        Some(&email),
+                        |input: &str| {
+                            let email = input.trim().to_ascii_lowercase();
+                            if email.is_empty() {
+                                return Ok(inquire::validator::Validation::Invalid(
+                                    "email address cannot be empty".into(),
+                                ));
+                            }
+                            if email.starts_with('@') || !email.contains('@') {
+                                return Ok(inquire::validator::Validation::Invalid(
+                                    "Please enter a full email address".into(),
+                                ));
+                            }
+                            if let Err(error) = crate::config::validate_sender_rule(&email) {
+                                return Ok(inquire::validator::Validation::Invalid(
+                                    format!("Invalid email address: {error}").into(),
+                                ));
+                            }
+                            Ok(inquire::validator::Validation::Valid)
+                        },
+                    )?;
+                    app_password = tui::prompt_password(
+                        "Enter email app password (16-character app password)",
+                    )?;
+                    if app_password.trim().is_empty() {
+                        return Err("email app password cannot be empty".into());
+                    }
+
+                    if is_custom_imap_provider {
+                        imap_host = tui::prompt_text_validated(
+                            "Enter IMAP host",
+                            Some(&imap_host),
+                            |input: &str| {
+                                if input.trim().is_empty() {
+                                    return Ok(inquire::validator::Validation::Invalid(
+                                        "IMAP host cannot be empty".into(),
+                                    ));
+                                }
+                                Ok(inquire::validator::Validation::Valid)
+                            },
+                        )?
+                        .trim()
+                        .to_string();
+
+                        let imap_port_default = imap_port.to_string();
+                        let imap_port_value = tui::prompt_text_validated(
+                            "Enter IMAP port",
+                            Some(&imap_port_default),
+                            |input: &str| match input.parse::<u16>() {
+                                Ok(port) if port > 0 => Ok(inquire::validator::Validation::Valid),
+                                _ => Ok(inquire::validator::Validation::Invalid(
+                                    "Please enter a valid port number (1-65535)".into(),
+                                )),
+                            },
+                        )?;
+                        imap_port = imap_port_value.parse::<u16>().unwrap();
+                    }
                 }
             }
-        };
-        let refresh_token = if let Some(existing_refresh_token) =
-            existing.gmail_refresh_token.as_deref()
-        {
-            tui::print_info(
-                "Existing Gmail refresh_token",
-                &mask_secret(existing_refresh_token),
-            );
-            let keep_existing = tui::prompt_confirm("Reuse existing Gmail refresh_token?", true)?;
-            if keep_existing {
-                existing_refresh_token.to_string()
-            } else {
-                request_gmail_refresh_token(&oauth_client)?
-            }
-        } else {
-            request_gmail_refresh_token(&oauth_client)?
-        };
+        }
 
-        Some(OnboardGmailConfig {
+        Some(OnboardEmailConfig {
             mode,
             sender_rules,
             account_virtual_key,
-            user_id,
-            refresh_token,
-            client_secret_file,
-            client_secret_json,
+            email: email.trim().to_string(),
+            app_password: app_password.trim().to_string(),
+            imap_host,
+            imap_port,
         })
     } else {
         None
@@ -1353,7 +946,7 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
         openclaw_config_path: PathBuf::from(openclaw_config_path),
         server_host,
         server_port,
-        gmail,
+        email,
     })
 }
 
@@ -1394,39 +987,36 @@ patterns = [
         provider = toml_string(&config.provider),
     );
 
-    if let Some(gmail) = &config.gmail {
-        let (allow_senders, deny_senders) = match gmail.mode {
-            OnboardGmailMode::Allowlist => (toml_string_array(&gmail.sender_rules), "[]".into()),
-            OnboardGmailMode::Denylist => ("[]".into(), toml_string_array(&gmail.sender_rules)),
+    if let Some(email) = &config.email {
+        let (allow_senders, deny_senders) = match email.mode {
+            OnboardEmailMode::Allowlist => (toml_string_array(&email.sender_rules), "[]".into()),
+            OnboardEmailMode::Denylist => ("[]".into(), toml_string_array(&email.sender_rules)),
         };
 
         output.push_str(&format!(
             r#"
-[gmail]
+[email]
 enabled = true
 mode = "{mode}"
 allow_senders = {allow_senders}
 deny_senders = {deny_senders}
 default_max_results = 50
-api_base_url = "https://gmail.googleapis.com/"
 
-[[gmail.accounts]]
+[[email.accounts]]
 virtual_key = {virtual_key}
-user_id = {user_id}
+email = {email}
+app_password = {app_password}
+imap_host = {imap_host}
+imap_port = {imap_port}
 "#,
-            mode = gmail.mode.as_toml_value(),
+            mode = email.mode.as_toml_value(),
             allow_senders = allow_senders,
             deny_senders = deny_senders,
-            virtual_key = toml_string(&gmail.account_virtual_key),
-            user_id = toml_string(&gmail.user_id),
-        ));
-        output.push_str(&format!(
-            "refresh_token = {}\n",
-            toml_string(&gmail.refresh_token)
-        ));
-        output.push_str(&format!(
-            "client_secret_file = {}\n",
-            toml_string(&gmail.client_secret_file)
+            virtual_key = toml_string(&email.account_virtual_key),
+            email = toml_string(&email.email),
+            app_password = toml_string(&email.app_password),
+            imap_host = toml_string(&email.imap_host),
+            imap_port = email.imap_port,
         ));
     }
 
@@ -1449,58 +1039,84 @@ pub fn openclaw_config_root(openclaw_config_path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-pub fn render_openclaw_gmail_messages_skill(config: &OnboardConfig) -> Option<OnboardSkillBundle> {
-    let gmail = config.gmail.as_ref()?;
+pub fn render_openclaw_email_messages_skill(config: &OnboardConfig) -> Option<OnboardSkillBundle> {
+    config.email.as_ref()?;
     let base_url = format_clawshell_base_url(&config.server_host, config.server_port);
-    let virtual_key = gmail.account_virtual_key.as_str();
 
     let skill_md = format!(
         r#"---
-name: get-gmail-messages
-description: Get Gmail messages.
+name: get-email-messages
+description: Get Email messages.
 ---
 
-# Get Gmail Messages
+# Get Email Messages
 
-Fetch Gmail message metadata through specific endpoint using `curl`.
+Fetch Email message metadata and individual message content through the Email endpoint using
+`curl`.
 
 ## Request
 
 - Method: `GET`
-- Path: `/v1/gmail/messages`
+- Path: `/v1/email/messages`
 - Base URL: `{base_url}`
-- Authorization: `Bearer {virtual_key}`
+- Authorization: `Bearer <email_virtual_key>`
+
+## Authentication Key Source
+
+1. First, retrieve `email_virtual_key` from memory/context.
+2. If not available, ask the user for the Email virtual key.
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer {virtual_key}" \
-  "{base_url}/v1/gmail/messages"
+  -H "Authorization: Bearer <email_virtual_key>" \
+  "{base_url}/v1/email/messages"
 ```
 
 ## Optional Query Parameters
 
-- `q`
-- `max_results` (1-100)
-- `page_token`
-- `include_spam_trash`
+- `folder` (defaults to `INBOX`)
+- `limit` (1-100)
+- `unread_only` (`true`/`false`)
+- `from`
+- `subject`
 
 ## Response
 
 Top-level fields:
 - `messages`
-- `next_page_token`
+
+## Get Individual Message Content
+
+After listing messages, fetch one message by `id`:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer <email_virtual_key>" \
+  "{base_url}/v1/email/messages/42"
+```
+
+Content response fields:
+- `metadata`
+- `headers`
+- `text_body`
+- `html_body`
 
 Load `references/api-usage.md` for detailed examples and status-code behavior.
 "#
     );
 
     let reference_md = format!(
-        r#"# GET /v1/gmail/messages API Usage
+        r#"# GET /v1/email/messages API Usage
 
 ## Endpoint
 
-- URL: `{base_url}/v1/gmail/messages`
-- Header: `Authorization: Bearer {virtual_key}`
+- URL: `{base_url}/v1/email/messages`
+- Header: `Authorization: Bearer <email_virtual_key>`
+
+## Key Sourcing Order
+
+1. Retrieve `email_virtual_key` from memory/context first.
+2. Ask the user for it only if memory/context does not contain it.
 
 ## Examples
 
@@ -1508,31 +1124,46 @@ Load `references/api-usage.md` for detailed examples and status-code behavior.
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer {virtual_key}" \
-  "{base_url}/v1/gmail/messages"
+  -H "Authorization: Bearer <email_virtual_key>" \
+  "{base_url}/v1/email/messages"
 ```
 
-### Query + pagination
+### Filter unread from trusted.local
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer {virtual_key}" \
-  --get "{base_url}/v1/gmail/messages" \
-  --data-urlencode "q=from:alice@example.com newer_than:7d" \
-  --data-urlencode "max_results=25" \
-  --data-urlencode "page_token=<next_page_token>"
+  -H "Authorization: Bearer <email_virtual_key>" \
+  --get "{base_url}/v1/email/messages" \
+  --data-urlencode "folder=INBOX" \
+  --data-urlencode "limit=25" \
+  --data-urlencode "unread_only=true" \
+  --data-urlencode "from=@trusted.local" \
+  --data-urlencode "subject=invoice"
 ```
+
+### Fetch a message's full content
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer <email_virtual_key>" \
+  "{base_url}/v1/email/messages/42"
+```
+
+Expected top-level fields:
+- `metadata`
+- `headers`
+- `text_body`
+- `html_body`
 
 ## Notes
 
-- `max_results` must be between 1 and 100.
-- `next_page_token` is returned when more pages are available.
+- `limit` must be between 1 and 100.
 - Error payloads are JSON objects: `{{"error":"message"}}`.
 "#
     );
 
     Some(OnboardSkillBundle {
-        name: OPENCLAW_GMAIL_MESSAGES_SKILL_NAME,
+        name: OPENCLAW_EMAIL_MESSAGES_SKILL_NAME,
         files: vec![
             OnboardSkillFile {
                 relative_path: "SKILL.md",
@@ -1833,7 +1464,7 @@ mod tests {
             openclaw_config_path: PathBuf::from("/tmp/test-openclaw.json"),
             server_host: "127.0.0.1".to_string(),
             server_port: 18790,
-            gmail: None,
+            email: None,
         }
     }
 
@@ -1859,7 +1490,7 @@ mod tests {
         assert!(toml_str.contains("log_level = \"info\""));
         assert!(toml_str.contains(&format!("version = \"{}\"", env!("CARGO_PKG_VERSION"))));
         assert!(toml_str.contains("[dlp]"));
-        assert!(!toml_str.contains("[gmail]"));
+        assert!(!toml_str.contains("[email]"));
         assert!(!toml_str.contains("[rate_limit]"));
     }
 
@@ -1873,38 +1504,110 @@ mod tests {
     }
 
     #[test]
-    fn test_sender_rule_shape_validation() {
-        assert!(sender_rule_has_valid_shape("alice@example.com"));
-        assert!(sender_rule_has_valid_shape("@trusted.org"));
-        assert!(!sender_rule_has_valid_shape("aliceexample.com"));
-        assert!(!sender_rule_has_valid_shape("@"));
-        assert!(!sender_rule_has_valid_shape("alice@localhost"));
+    fn test_sender_rule_validation_matches_runtime_rules() {
+        assert!(crate::config::validate_sender_rule("alice@example.com").is_ok());
+        assert!(crate::config::validate_sender_rule("@trusted.org").is_ok());
+        assert!(crate::config::validate_sender_rule("@.example.com").is_err());
+        assert!(crate::config::validate_sender_rule("alice@example..com").is_err());
+        assert!(crate::config::validate_sender_rule("aliceexample.com").is_err());
+        assert!(crate::config::validate_sender_rule("@").is_err());
+        assert!(crate::config::validate_sender_rule("alice@localhost").is_err());
     }
 
     #[test]
-    fn test_generate_clawshell_config_with_gmail_refresh_token() {
+    fn test_infer_imap_provider_preset_from_host() {
+        assert_eq!(
+            infer_imap_provider_preset(None),
+            EmailImapProviderPreset::Gmail
+        );
+        assert_eq!(
+            infer_imap_provider_preset(Some("imap.gmail.com")),
+            EmailImapProviderPreset::Gmail
+        );
+        assert_eq!(
+            infer_imap_provider_preset(Some("imap-mail.outlook.com")),
+            EmailImapProviderPreset::Outlook
+        );
+        assert_eq!(
+            infer_imap_provider_preset(Some("imap.custom.local")),
+            EmailImapProviderPreset::Other
+        );
+    }
+
+    #[test]
+    fn test_email_provider_defaults_for_presets() {
+        assert_eq!(
+            email_provider_defaults(EmailImapProviderPreset::Gmail),
+            Some(("imap.gmail.com", 993))
+        );
+        assert_eq!(
+            email_provider_defaults(EmailImapProviderPreset::Outlook),
+            Some(("imap-mail.outlook.com", 993))
+        );
+        assert_eq!(
+            email_provider_defaults(EmailImapProviderPreset::Other),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_imap_provider_choice() {
+        assert_eq!(
+            parse_imap_provider_choice(EMAIL_PROVIDER_PRESET_GMAIL),
+            EmailImapProviderPreset::Gmail
+        );
+        assert_eq!(
+            parse_imap_provider_choice(EMAIL_PROVIDER_PRESET_OUTLOOK),
+            EmailImapProviderPreset::Outlook
+        );
+        assert_eq!(
+            parse_imap_provider_choice(EMAIL_PROVIDER_PRESET_OTHER),
+            EmailImapProviderPreset::Other
+        );
+    }
+
+    #[test]
+    fn test_generate_clawshell_config_with_email_imap_credentials() {
         let mut config = test_config();
-        config.gmail = Some(OnboardGmailConfig {
-            mode: OnboardGmailMode::Denylist,
-            sender_rules: vec!["@blocked.com".to_string()],
-            account_virtual_key: "{gmail-virtual-key}".to_string(),
-            user_id: "me".to_string(),
-            refresh_token: "1//refresh".to_string(),
-            client_secret_file: "/etc/clawshell/client_secret.json".to_string(),
-            client_secret_json: "{}".to_string(),
+        config.email = Some(OnboardEmailConfig {
+            mode: OnboardEmailMode::Denylist,
+            sender_rules: vec!["@blocked.local".to_string()],
+            account_virtual_key: "{email-virtual-key}".to_string(),
+            email: "bot@gmail.com".to_string(),
+            app_password: "abcd efgh ijkl mnop".to_string(),
+            imap_host: "imap.gmail.com".to_string(),
+            imap_port: 993,
         });
 
         let toml_str = generate_clawshell_config(&config);
-        assert!(toml_str.contains("[gmail]"));
+        assert!(toml_str.contains("[email]"));
         assert!(toml_str.contains("enabled = true"));
         assert!(toml_str.contains("mode = \"denylist\""));
         assert!(toml_str.contains("allow_senders = []"));
-        assert!(toml_str.contains("deny_senders = [\"@blocked.com\"]"));
-        assert!(toml_str.contains("refresh_token = \"1//refresh\""));
-        assert!(toml_str.contains("client_secret_file = \"/etc/clawshell/client_secret.json\""));
-        assert!(!toml_str.contains("client_id ="));
-        assert!(!toml_str.contains("client_secret ="));
-        assert!(!toml_str.contains("token_uri ="));
+        assert!(toml_str.contains("deny_senders = [\"@blocked.local\"]"));
+        assert!(toml_str.contains("email = \"bot@gmail.com\""));
+        assert!(toml_str.contains("app_password = \"abcd efgh ijkl mnop\""));
+        assert!(toml_str.contains("imap_host = \"imap.gmail.com\""));
+        assert!(toml_str.contains("imap_port = 993"));
+        assert!(!toml_str.contains("refresh_token ="));
+    }
+
+    #[test]
+    fn test_generate_clawshell_config_with_outlook_imap_credentials() {
+        let mut config = test_config();
+        config.email = Some(OnboardEmailConfig {
+            mode: OnboardEmailMode::Allowlist,
+            sender_rules: vec!["@trusted.local".to_string()],
+            account_virtual_key: "vk-email-001".to_string(),
+            email: "bot@outlook.com".to_string(),
+            app_password: "abcd efgh ijkl mnop".to_string(),
+            imap_host: "imap-mail.outlook.com".to_string(),
+            imap_port: 993,
+        });
+
+        let toml_str = generate_clawshell_config(&config);
+        assert!(toml_str.contains("imap_host = \"imap-mail.outlook.com\""));
+        assert!(toml_str.contains("imap_port = 993"));
     }
 
     #[test]
@@ -1917,26 +1620,26 @@ mod tests {
     }
 
     #[test]
-    fn test_render_openclaw_gmail_messages_skill_returns_none_without_gmail() {
+    fn test_render_openclaw_email_messages_skill_returns_none_without_email() {
         let config = test_config();
-        assert!(render_openclaw_gmail_messages_skill(&config).is_none());
+        assert!(render_openclaw_email_messages_skill(&config).is_none());
     }
 
     #[test]
-    fn test_render_openclaw_gmail_messages_skill_renders_concrete_values() {
+    fn test_render_openclaw_email_messages_skill_renders_concrete_values() {
         let mut config = test_config();
-        config.gmail = Some(OnboardGmailConfig {
-            mode: OnboardGmailMode::Allowlist,
-            sender_rules: vec!["@trusted.org".to_string()],
-            account_virtual_key: "vk-gmail-001".to_string(),
-            user_id: "me".to_string(),
-            refresh_token: "1//refresh".to_string(),
-            client_secret_file: "oauth/client_secret.json".to_string(),
-            client_secret_json: "{}".to_string(),
+        config.email = Some(OnboardEmailConfig {
+            mode: OnboardEmailMode::Allowlist,
+            sender_rules: vec!["@trusted.local".to_string()],
+            account_virtual_key: "vk-email-001".to_string(),
+            email: "bot@gmail.com".to_string(),
+            app_password: "abcd efgh ijkl mnop".to_string(),
+            imap_host: "imap.gmail.com".to_string(),
+            imap_port: 993,
         });
 
-        let skill = render_openclaw_gmail_messages_skill(&config).unwrap();
-        assert_eq!(skill.name, OPENCLAW_GMAIL_MESSAGES_SKILL_NAME);
+        let skill = render_openclaw_email_messages_skill(&config).unwrap();
+        assert_eq!(skill.name, OPENCLAW_EMAIL_MESSAGES_SKILL_NAME);
         assert_eq!(skill.files.len(), 2);
 
         let skill_md = skill
@@ -1947,116 +1650,28 @@ mod tests {
             .content
             .as_str();
         assert!(skill_md.contains("http://127.0.0.1:18790"));
-        assert!(skill_md.contains("Bearer vk-gmail-001"));
+        assert!(skill_md.contains("Bearer <email_virtual_key>"));
+        assert!(skill_md.contains("First, retrieve `email_virtual_key` from memory/context."));
+        assert!(skill_md.contains("If not available, ask the user for the Email virtual key."));
+        assert!(skill_md.contains("/v1/email/messages/42"));
+        assert!(skill_md.contains("html_body"));
+        assert!(!skill_md.contains("vk-email-001"));
         assert!(!skill_md.contains("CLAWSHELL_BASE_URL"));
         assert!(!skill_md.contains("VIRTUAL_KEY"));
-    }
 
-    #[test]
-    fn test_parse_google_oauth_client_config_accepts_installed() {
-        let json = r#"{"installed":{"client_id":"id.apps.googleusercontent.com","client_secret":"secret-123","redirect_uris":["http://localhost/callback"]}}"#;
-        let parsed = parse_google_oauth_client_config(json).unwrap();
-        assert_eq!(parsed.client_id, "id.apps.googleusercontent.com");
-        assert_eq!(parsed.client_secret, "secret-123");
-        assert_eq!(parsed.redirect_uri, "http://localhost/callback");
-    }
-
-    #[test]
-    fn test_parse_google_oauth_client_config_accepts_web_with_defaults() {
-        let json = r#"{"web":{"client_id":"web-id.apps.googleusercontent.com"}}"#;
-        let parsed = parse_google_oauth_client_config(json).unwrap();
-        assert_eq!(parsed.client_id, "web-id.apps.googleusercontent.com");
-        assert_eq!(parsed.auth_uri, GOOGLE_DEFAULT_AUTH_URI);
-        assert_eq!(parsed.token_uri, GOOGLE_DEFAULT_TOKEN_URI);
-        assert_eq!(parsed.redirect_uri, GOOGLE_DEFAULT_REDIRECT_URI);
-    }
-
-    #[test]
-    fn test_parse_google_oauth_client_config_rejects_missing_client_id() {
-        let json = r#"{"installed":{"client_secret":"secret"}}"#;
-        assert!(parse_google_oauth_client_config(json).is_err());
-    }
-
-    #[test]
-    fn test_extract_google_authorization_code_from_redirect_url() {
-        let input = "https://localhost/?state=abc&code=4/0AQSTgQ-example&scope=email";
-        let code = extract_google_authorization_code(input).unwrap();
-        assert_eq!(code, "4/0AQSTgQ-example");
-    }
-
-    #[test]
-    fn test_extract_google_authorization_code_from_code_equals_input() {
-        let code = extract_google_authorization_code("code=4/0AQSTgQ-inline").unwrap();
-        assert_eq!(code, "4/0AQSTgQ-inline");
-    }
-
-    #[test]
-    fn test_extract_google_authorization_code_rejects_error_redirect() {
-        let input = "https://localhost/?error=access_denied&error_description=Denied";
-        let err = extract_google_authorization_code(input).unwrap_err();
-        assert!(err.contains("authorization failed: access_denied"));
-    }
-
-    #[test]
-    fn test_parse_google_device_code_response_accepts_verification_uri() {
-        let json = r#"{
-            "device_code": "device-123",
-            "user_code": "ABCD-EFGH",
-            "verification_uri": "https://www.google.com/device",
-            "verification_uri_complete": "https://www.google.com/device?user_code=ABCD-EFGH",
-            "expires_in": 1800,
-            "interval": 7
-        }"#;
-        let parsed = parse_google_device_code_response(json).unwrap();
-        assert_eq!(parsed.device_code, "device-123");
-        assert_eq!(parsed.user_code, "ABCD-EFGH");
-        assert_eq!(parsed.verification_uri, "https://www.google.com/device");
-        assert_eq!(
-            parsed.verification_uri_complete.as_deref(),
-            Some("https://www.google.com/device?user_code=ABCD-EFGH")
-        );
-        assert_eq!(parsed.expires_in_seconds, 1800);
-        assert_eq!(parsed.interval_seconds, 7);
-    }
-
-    #[test]
-    fn test_parse_google_device_code_response_accepts_verification_url_alias() {
-        let json = r#"{
-            "device_code": "device-abc",
-            "user_code": "WXYZ-1234",
-            "verification_url": "https://example.com/device"
-        }"#;
-        let parsed = parse_google_device_code_response(json).unwrap();
-        assert_eq!(parsed.verification_uri, "https://example.com/device");
-        assert_eq!(parsed.expires_in_seconds, 1800);
-        assert_eq!(
-            parsed.interval_seconds,
-            GOOGLE_DEFAULT_DEVICE_CODE_INTERVAL_SECONDS
-        );
-    }
-
-    #[test]
-    fn test_parse_google_device_code_response_rejects_missing_verification_url() {
-        let json = r#"{"device_code":"device-123","user_code":"ABCD-EFGH"}"#;
-        assert!(parse_google_device_code_response(json).is_err());
-    }
-
-    #[test]
-    fn test_is_device_flow_unavailable_error_classifies_unauthorized_client() {
-        assert!(is_device_flow_unavailable_error(
-            StatusCode::UNAUTHORIZED,
-            Some("unauthorized_client"),
-            Some("Unauthorized"),
-        ));
-    }
-
-    #[test]
-    fn test_is_device_flow_unavailable_error_does_not_classify_access_denied() {
-        assert!(!is_device_flow_unavailable_error(
-            StatusCode::BAD_REQUEST,
-            Some("access_denied"),
-            Some("Denied by user"),
-        ));
+        let reference_md = skill
+            .files
+            .iter()
+            .find(|file| file.relative_path == "references/api-usage.md")
+            .unwrap()
+            .content
+            .as_str();
+        assert!(reference_md.contains("trusted.local"));
+        assert!(reference_md.contains("/v1/email/messages/42"));
+        assert!(reference_md.contains("text_body"));
+        assert!(reference_md.contains("Bearer <email_virtual_key>"));
+        assert!(reference_md.contains("Retrieve `email_virtual_key` from memory/context first."));
+        assert!(!reference_md.contains("vk-email-001"));
     }
 
     #[test]
@@ -2449,6 +2064,18 @@ mod tests {
             ..Default::default()
         };
         assert!(with_host.has_any());
+
+        let with_imap_host = ExistingConfig {
+            email_imap_host: Some("imap.custom.local".to_string()),
+            ..Default::default()
+        };
+        assert!(with_imap_host.has_any());
+
+        let with_imap_port = ExistingConfig {
+            email_imap_port: Some(143),
+            ..Default::default()
+        };
+        assert!(with_imap_port.has_any());
     }
 
     #[test]
@@ -2511,7 +2138,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_existing_config_reads_gmail_defaults() {
+    fn test_load_existing_config_reads_email_defaults() {
         let root = VfsPath::new(MemoryFS::new());
 
         let config_json = serde_json::json!({
@@ -2534,43 +2161,43 @@ mod tests {
 host = "127.0.0.1"
 port = 18790
 
-[gmail]
+[email]
 enabled = true
 mode = "allowlist"
 allow_senders = ["alice@example.com", "@trusted.org"]
 
-[[gmail.accounts]]
+[[email.accounts]]
 virtual_key = "{clawshell-virtual-key-openai}"
-refresh_token = "refresh-existing"
-client_secret_file = "/etc/clawshell/oauth/client_secret.json"
-user_id = "me"
+email = "bot@gmail.com"
+app_password = "existing-app-password"
+imap_host = "imap.gmail.com"
+imap_port = 993
 "#,
         );
 
         let config_dir = root.join("etc/clawshell").unwrap();
         let existing = load_existing_config_from_vfs(&config_dir).unwrap();
-        assert_eq!(existing.gmail_enabled, Some(true));
-        assert_eq!(existing.gmail_mode, Some(OnboardGmailMode::Allowlist));
+        assert_eq!(existing.email_enabled, Some(true));
+        assert_eq!(existing.email_mode, Some(OnboardEmailMode::Allowlist));
         assert_eq!(
-            existing.gmail_sender_rules,
+            existing.email_sender_rules,
             vec!["alice@example.com".to_string(), "@trusted.org".to_string()]
         );
         assert_eq!(
-            existing.gmail_account_virtual_key.as_deref(),
+            existing.email_account_virtual_key.as_deref(),
             Some("{clawshell-virtual-key-openai}")
         );
+        assert_eq!(existing.email_email.as_deref(), Some("bot@gmail.com"));
         assert_eq!(
-            existing.gmail_refresh_token.as_deref(),
-            Some("refresh-existing")
+            existing.email_app_password.as_deref(),
+            Some("existing-app-password")
         );
-        assert_eq!(
-            existing.gmail_client_secret_file.as_deref(),
-            Some("/etc/clawshell/oauth/client_secret.json")
-        );
+        assert_eq!(existing.email_imap_host.as_deref(), Some("imap.gmail.com"));
+        assert_eq!(existing.email_imap_port, Some(993));
     }
 
     #[test]
-    fn test_load_existing_config_prefers_matching_gmail_account() {
+    fn test_load_existing_config_prefers_matching_email_account() {
         let root = VfsPath::new(MemoryFS::new());
 
         let config_json = serde_json::json!({
@@ -2593,44 +2220,45 @@ user_id = "me"
 host = "127.0.0.1"
 port = 18790
 
-[gmail]
+[email]
 enabled = true
 mode = "denylist"
-deny_senders = ["@blocked.com"]
+deny_senders = ["@blocked.local"]
 
-[[gmail.accounts]]
+[[email.accounts]]
 virtual_key = "vk-other"
-refresh_token = "refresh-other"
-client_secret_file = "/etc/clawshell/oauth/other_client_secret.json"
-user_id = "me"
+email = "other@email.com"
+app_password = "other-app-password"
+imap_host = "imap.gmail.com"
+imap_port = 993
 
-[[gmail.accounts]]
+[[email.accounts]]
 virtual_key = "vk-match"
-refresh_token = "refresh-match"
-client_secret_file = "/etc/clawshell/oauth/match_client_secret.json"
-user_id = "me"
+email = "match@email.com"
+app_password = "match-app-password"
+imap_host = "imap.gmail.com"
+imap_port = 993
 "#,
         );
 
         let config_dir = root.join("etc/clawshell").unwrap();
         let existing = load_existing_config_from_vfs(&config_dir).unwrap();
-        assert_eq!(existing.gmail_mode, Some(OnboardGmailMode::Denylist));
+        assert_eq!(existing.email_mode, Some(OnboardEmailMode::Denylist));
         assert_eq!(
-            existing.gmail_sender_rules,
-            vec!["@blocked.com".to_string()]
+            existing.email_sender_rules,
+            vec!["@blocked.local".to_string()]
         );
         assert_eq!(
-            existing.gmail_account_virtual_key.as_deref(),
+            existing.email_account_virtual_key.as_deref(),
             Some("vk-match")
         );
+        assert_eq!(existing.email_email.as_deref(), Some("match@email.com"));
         assert_eq!(
-            existing.gmail_refresh_token.as_deref(),
-            Some("refresh-match")
+            existing.email_app_password.as_deref(),
+            Some("match-app-password")
         );
-        assert_eq!(
-            existing.gmail_client_secret_file.as_deref(),
-            Some("/etc/clawshell/oauth/match_client_secret.json")
-        );
+        assert_eq!(existing.email_imap_host.as_deref(), Some("imap.gmail.com"));
+        assert_eq!(existing.email_imap_port, Some(993));
     }
 
     #[test]

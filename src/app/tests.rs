@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -11,11 +10,11 @@ use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::{AppState, build_router};
-use crate::config::{Config, DlpAction, DlpPattern, GmailMode, Provider};
+use crate::config::{Config, DlpAction, DlpPattern, EmailMode, Provider};
 use crate::dlp::DlpScanner;
-use crate::gmail::{
-    GmailAccountCredentials, GmailListMessagesResponse, GmailMessageMetadata, GmailPolicy,
-    GmailRefreshCredentials, GmailService,
+use crate::email::{
+    EmailAccountCredentials, EmailListMessagesResponse, EmailMessageContent, EmailMessageMetadata,
+    EmailPolicy, EmailService,
 };
 use crate::keys::{KeyManager, ResolvedKey};
 use crate::proxy::ProxyClient;
@@ -66,10 +65,10 @@ fn make_app(upstream_url: &str) -> axum::Router {
             upstream_urls,
             "2023-06-01".to_string(),
         )),
-        gmail_enabled: false,
-        gmail_policy: None,
-        gmail_accounts: Arc::new(BTreeMap::new()),
-        gmail_service: Arc::new(GmailService::mock_disabled()),
+        email_enabled: false,
+        email_policy: None,
+        email_accounts: Arc::new(BTreeMap::new()),
+        email_service: Arc::new(EmailService::mock_disabled()),
     };
 
     build_router(state)
@@ -103,10 +102,10 @@ fn make_app_with_anthropic(upstream_url: &str) -> axum::Router {
             upstream_urls,
             "2023-06-01".to_string(),
         )),
-        gmail_enabled: false,
-        gmail_policy: None,
-        gmail_accounts: Arc::new(BTreeMap::new()),
-        gmail_service: Arc::new(GmailService::mock_disabled()),
+        email_enabled: false,
+        email_policy: None,
+        email_accounts: Arc::new(BTreeMap::new()),
+        email_service: Arc::new(EmailService::mock_disabled()),
     };
 
     build_router(state)
@@ -560,7 +559,7 @@ virtual_key = "vk-1"
 real_key = "sk-real-1"
 "#;
     let config = Config::parse(toml_str).unwrap();
-    let state = AppState::from_config(&config, None).unwrap();
+    let state = AppState::from_config(&config).unwrap();
     let resolved = state.key_manager.resolve("vk-1").unwrap();
     assert_eq!(resolved.real_key, "sk-real-1");
     assert_eq!(resolved.provider, Provider::Openai);
@@ -586,7 +585,7 @@ real_key = "sk-ant-key"
 provider = "anthropic"
 "#;
     let config = Config::parse(toml_str).unwrap();
-    let state = AppState::from_config(&config, None).unwrap();
+    let state = AppState::from_config(&config).unwrap();
     let oai = state.key_manager.resolve("vk-oai").unwrap();
     assert_eq!(oai.real_key, "sk-oai-key");
     assert_eq!(oai.provider, Provider::Openai);
@@ -596,23 +595,7 @@ provider = "anthropic"
 }
 
 #[tokio::test]
-async fn test_app_state_from_config_with_gmail_client_secret_file() {
-    let temp = tempfile::tempdir().unwrap();
-    let oauth_dir = temp.path().join("oauth");
-    fs::create_dir_all(&oauth_dir).unwrap();
-    let secret_path = oauth_dir.join("client_secret.json");
-    fs::write(
-        &secret_path,
-        r#"{
-  "installed": {
-    "client_id": "file-client-id.apps.googleusercontent.com",
-    "client_secret": "file-client-secret",
-    "token_uri": "https://oauth2.googleapis.com/token"
-  }
-}"#,
-    )
-    .unwrap();
-
+async fn test_app_state_from_config_with_email_imap_fields() {
     let toml_str = r#"
 [server]
 host = "127.0.0.1"
@@ -621,32 +604,54 @@ port = 3000
 [upstream]
 openai_base_url = "https://api.openai.com"
 
-[gmail]
+[email]
 enabled = true
 mode = "allowlist"
 allow_senders = ["alice@example.com"]
 
-[[gmail.accounts]]
-virtual_key = "vk-gmail"
-refresh_token = "refresh-token"
-client_secret_file = "oauth/client_secret.json"
-user_id = "me"
+[[email.accounts]]
+virtual_key = "vk-email"
+email = "bot@gmail.com"
+app_password = "abcd efgh ijkl mnop"
+imap_host = "imap.gmail.com"
+imap_port = 993
 "#;
-    let config_path = temp.path().join("clawshell.toml");
     let config = Config::parse(toml_str).unwrap();
-    let state = AppState::from_config(&config, Some(&config_path)).unwrap();
+    let state = AppState::from_config(&config).unwrap();
 
-    let gmail = state.gmail_accounts.get("vk-gmail").unwrap();
-    assert_eq!(
-        gmail.refresh.client_id,
-        "file-client-id.apps.googleusercontent.com"
-    );
-    assert_eq!(gmail.refresh.client_secret, "file-client-secret");
-    assert_eq!(
-        gmail.refresh.token_uri,
-        "https://oauth2.googleapis.com/token"
-    );
-    assert_eq!(gmail.refresh.refresh_token, "refresh-token");
+    let email_account = state.email_accounts.get("vk-email").unwrap();
+    assert_eq!(email_account.email, "bot@gmail.com");
+    assert_eq!(email_account.app_password, "abcd efgh ijkl mnop");
+    assert_eq!(email_account.imap_host, "imap.gmail.com");
+    assert_eq!(email_account.imap_port, 993);
+}
+
+#[tokio::test]
+async fn test_app_state_from_config_skips_email_credentials_when_disabled() {
+    let toml_str = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+
+[email]
+enabled = false
+mode = "allowlist"
+allow_senders = ["alice@example.com"]
+
+[[email.accounts]]
+virtual_key = "vk-email"
+email = "bot@gmail.com"
+app_password = "abcd efgh ijkl mnop"
+"#;
+    let config = Config::parse(toml_str).unwrap();
+    let state = AppState::from_config(&config).unwrap();
+
+    assert!(!state.email_enabled);
+    assert!(state.email_policy.is_none());
+    assert!(state.email_accounts.is_empty());
 }
 
 // ========== Proxy Error Tests ==========
@@ -676,10 +681,10 @@ async fn test_proxy_error_on_unreachable_upstream() {
             },
             "2023-06-01".to_string(),
         )),
-        gmail_enabled: false,
-        gmail_policy: None,
-        gmail_accounts: Arc::new(BTreeMap::new()),
-        gmail_service: Arc::new(GmailService::mock_disabled()),
+        email_enabled: false,
+        email_policy: None,
+        email_accounts: Arc::new(BTreeMap::new()),
+        email_service: Arc::new(EmailService::mock_disabled()),
     };
 
     let app = build_router(state);
@@ -820,10 +825,10 @@ async fn test_anthropic_dlp_blocks_sensitive_data() {
             upstream_urls,
             "2023-06-01".to_string(),
         )),
-        gmail_enabled: false,
-        gmail_policy: None,
-        gmail_accounts: Arc::new(BTreeMap::new()),
-        gmail_service: Arc::new(GmailService::mock_disabled()),
+        email_enabled: false,
+        email_policy: None,
+        email_accounts: Arc::new(BTreeMap::new()),
+        email_service: Arc::new(EmailService::mock_disabled()),
     };
     let app = build_router(state);
 
@@ -908,10 +913,10 @@ fn make_app_with_redact(upstream_url: &str) -> axum::Router {
             upstream_urls,
             "2023-06-01".to_string(),
         )),
-        gmail_enabled: false,
-        gmail_policy: None,
-        gmail_accounts: Arc::new(BTreeMap::new()),
-        gmail_service: Arc::new(GmailService::mock_disabled()),
+        email_enabled: false,
+        email_policy: None,
+        email_accounts: Arc::new(BTreeMap::new()),
+        email_service: Arc::new(EmailService::mock_disabled()),
     };
 
     build_router(state)
@@ -1112,10 +1117,10 @@ async fn test_response_dlp_disabled() {
             upstream_urls,
             "2023-06-01".to_string(),
         )),
-        gmail_enabled: false,
-        gmail_policy: None,
-        gmail_accounts: Arc::new(BTreeMap::new()),
-        gmail_service: Arc::new(GmailService::mock_disabled()),
+        email_enabled: false,
+        email_policy: None,
+        email_accounts: Arc::new(BTreeMap::new()),
+        email_service: Arc::new(EmailService::mock_disabled()),
     };
     let app = build_router(state);
 
@@ -1402,10 +1407,10 @@ async fn test_streaming_response_with_dlp_enabled_passes_through() {
     assert!(body_str.contains("[DONE]"));
 }
 
-fn make_gmail_app(
-    policy: GmailPolicy,
-    gmail_accounts: BTreeMap<String, GmailAccountCredentials>,
-    gmail_service: Arc<GmailService>,
+fn make_email_app(
+    policy: EmailPolicy,
+    email_accounts: BTreeMap<String, EmailAccountCredentials>,
+    email_service: Arc<EmailService>,
 ) -> axum::Router {
     let mut upstream_urls = BTreeMap::new();
     upstream_urls.insert(Provider::Openai, "http://127.0.0.1:1".to_string());
@@ -1418,49 +1423,46 @@ fn make_gmail_app(
             upstream_urls,
             "2023-06-01".to_string(),
         )),
-        gmail_enabled: true,
-        gmail_policy: Some(policy),
-        gmail_accounts: Arc::new(gmail_accounts),
-        gmail_service,
+        email_enabled: true,
+        email_policy: Some(policy),
+        email_accounts: Arc::new(email_accounts),
+        email_service,
     };
 
     build_router(state)
 }
 
-fn test_gmail_credentials() -> GmailAccountCredentials {
-    GmailAccountCredentials {
-        refresh: GmailRefreshCredentials {
-            token_uri: "https://oauth2.googleapis.com/token".to_string(),
-            refresh_token: "refresh-token".to_string(),
-            client_id: "client-id".to_string(),
-            client_secret: "client-secret".to_string(),
-        },
-        user_id: "me".to_string(),
+fn test_email_credentials() -> EmailAccountCredentials {
+    EmailAccountCredentials {
+        email: "bot@gmail.com".to_string(),
+        app_password: "abcd efgh ijkl mnop".to_string(),
+        imap_host: "imap.gmail.com".to_string(),
+        imap_port: 993,
     }
 }
 
 #[tokio::test]
-async fn test_gmail_secure_allowlist_filters_senders() {
-    let policy = GmailPolicy {
-        mode: GmailMode::Allowlist,
-        sender_rules: vec!["@trusted.com".to_string()],
+async fn test_email_secure_allowlist_filters_senders() {
+    let policy = EmailPolicy {
+        mode: EmailMode::Allowlist,
+        sender_rules: vec!["@trusted.local".to_string()],
         default_max_results: 50,
     };
     let mut accounts = BTreeMap::new();
-    accounts.insert("vk-gmail".to_string(), test_gmail_credentials());
-    let service = GmailService::mock_static(GmailListMessagesResponse {
+    accounts.insert("vk-email".to_string(), test_email_credentials());
+    let service = EmailService::mock_static(EmailListMessagesResponse {
         messages: vec![
-            GmailMessageMetadata {
+            EmailMessageMetadata {
                 id: "msg-1".to_string(),
                 thread_id: Some("thread-1".to_string()),
-                from: Some("Alice <alice@trusted.com>".to_string()),
+                from: Some("Alice <alice@trusted.local>".to_string()),
                 subject: Some("Trusted".to_string()),
                 date: Some("Wed, 15 Jan 2025 10:00:00 +0000".to_string()),
                 snippet: Some("hello".to_string()),
                 internal_date_ms: Some(1736935200000),
                 label_ids: vec!["INBOX".to_string()],
             },
-            GmailMessageMetadata {
+            EmailMessageMetadata {
                 id: "msg-2".to_string(),
                 thread_id: Some("thread-2".to_string()),
                 from: Some("Mallory <mallory@evil.com>".to_string()),
@@ -1474,11 +1476,11 @@ async fn test_gmail_secure_allowlist_filters_senders() {
         next_page_token: Some("next-token".to_string()),
     });
 
-    let app = make_gmail_app(policy, accounts, Arc::new(service));
+    let app = make_email_app(policy, accounts, Arc::new(service));
     let req = Request::builder()
         .method("GET")
-        .uri("/v1/gmail/messages")
-        .header("authorization", "Bearer vk-gmail")
+        .uri("/v1/email/messages")
+        .header("authorization", "Bearer vk-email")
         .body(Body::empty())
         .unwrap();
 
@@ -1499,27 +1501,27 @@ async fn test_gmail_secure_allowlist_filters_senders() {
 }
 
 #[tokio::test]
-async fn test_gmail_secure_denylist_filters_senders() {
-    let policy = GmailPolicy {
-        mode: GmailMode::Denylist,
-        sender_rules: vec!["@blocked.com".to_string()],
+async fn test_email_secure_denylist_filters_senders() {
+    let policy = EmailPolicy {
+        mode: EmailMode::Denylist,
+        sender_rules: vec!["@blocked.local".to_string()],
         default_max_results: 50,
     };
     let mut accounts = BTreeMap::new();
-    accounts.insert("vk-gmail".to_string(), test_gmail_credentials());
-    let service = GmailService::mock_static(GmailListMessagesResponse {
+    accounts.insert("vk-email".to_string(), test_email_credentials());
+    let service = EmailService::mock_static(EmailListMessagesResponse {
         messages: vec![
-            GmailMessageMetadata {
+            EmailMessageMetadata {
                 id: "msg-1".to_string(),
                 thread_id: Some("thread-1".to_string()),
-                from: Some("Alert <alert@blocked.com>".to_string()),
+                from: Some("Alert <alert@blocked.local>".to_string()),
                 subject: Some("Blocked".to_string()),
                 date: None,
                 snippet: Some("blocked".to_string()),
                 internal_date_ms: None,
                 label_ids: vec!["INBOX".to_string()],
             },
-            GmailMessageMetadata {
+            EmailMessageMetadata {
                 id: "msg-2".to_string(),
                 thread_id: Some("thread-2".to_string()),
                 from: Some("News <news@safe.com>".to_string()),
@@ -1533,11 +1535,11 @@ async fn test_gmail_secure_denylist_filters_senders() {
         next_page_token: None,
     });
 
-    let app = make_gmail_app(policy, accounts, Arc::new(service));
+    let app = make_email_app(policy, accounts, Arc::new(service));
     let req = Request::builder()
         .method("GET")
-        .uri("/v1/gmail/messages")
-        .header("authorization", "Bearer vk-gmail")
+        .uri("/v1/email/messages")
+        .header("authorization", "Bearer vk-email")
         .body(Body::empty())
         .unwrap();
 
@@ -1552,23 +1554,23 @@ async fn test_gmail_secure_denylist_filters_senders() {
 }
 
 #[tokio::test]
-async fn test_gmail_secure_unknown_virtual_key_rejected() {
-    let policy = GmailPolicy {
-        mode: GmailMode::Allowlist,
-        sender_rules: vec!["@trusted.com".to_string()],
+async fn test_email_secure_unknown_virtual_key_rejected() {
+    let policy = EmailPolicy {
+        mode: EmailMode::Allowlist,
+        sender_rules: vec!["@trusted.local".to_string()],
         default_max_results: 50,
     };
     let mut accounts = BTreeMap::new();
-    accounts.insert("vk-gmail".to_string(), test_gmail_credentials());
-    let service = GmailService::mock_static(GmailListMessagesResponse {
+    accounts.insert("vk-email".to_string(), test_email_credentials());
+    let service = EmailService::mock_static(EmailListMessagesResponse {
         messages: vec![],
         next_page_token: None,
     });
 
-    let app = make_gmail_app(policy, accounts, Arc::new(service));
+    let app = make_email_app(policy, accounts, Arc::new(service));
     let req = Request::builder()
         .method("GET")
-        .uri("/v1/gmail/messages")
+        .uri("/v1/email/messages")
         .header("authorization", "Bearer vk-other")
         .body(Body::empty())
         .unwrap();
@@ -1578,24 +1580,24 @@ async fn test_gmail_secure_unknown_virtual_key_rejected() {
 }
 
 #[tokio::test]
-async fn test_gmail_secure_rejects_invalid_max_results() {
-    let policy = GmailPolicy {
-        mode: GmailMode::Allowlist,
-        sender_rules: vec!["@trusted.com".to_string()],
+async fn test_email_secure_rejects_invalid_limit() {
+    let policy = EmailPolicy {
+        mode: EmailMode::Allowlist,
+        sender_rules: vec!["@trusted.local".to_string()],
         default_max_results: 50,
     };
     let mut accounts = BTreeMap::new();
-    accounts.insert("vk-gmail".to_string(), test_gmail_credentials());
-    let service = GmailService::mock_static(GmailListMessagesResponse {
+    accounts.insert("vk-email".to_string(), test_email_credentials());
+    let service = EmailService::mock_static(EmailListMessagesResponse {
         messages: vec![],
         next_page_token: None,
     });
 
-    let app = make_gmail_app(policy, accounts, Arc::new(service));
+    let app = make_email_app(policy, accounts, Arc::new(service));
     let req = Request::builder()
         .method("GET")
-        .uri("/v1/gmail/messages?max_results=101")
-        .header("authorization", "Bearer vk-gmail")
+        .uri("/v1/email/messages?limit=101")
+        .header("authorization", "Bearer vk-email")
         .body(Body::empty())
         .unwrap();
 
@@ -1604,12 +1606,174 @@ async fn test_gmail_secure_rejects_invalid_max_results() {
 }
 
 #[tokio::test]
-async fn test_gmail_secure_endpoint_disabled_returns_not_found() {
+async fn test_email_secure_endpoint_disabled_returns_not_found() {
     let mock_server = MockServer::start().await;
     let app = make_app(&mock_server.uri());
     let req = Request::builder()
         .method("GET")
-        .uri("/v1/gmail/messages")
+        .uri("/v1/email/messages")
+        .header("authorization", "Bearer vk-test-1")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_email_message_content_success() {
+    let policy = EmailPolicy {
+        mode: EmailMode::Allowlist,
+        sender_rules: vec!["@trusted.local".to_string()],
+        default_max_results: 50,
+    };
+    let mut accounts = BTreeMap::new();
+    accounts.insert("vk-email".to_string(), test_email_credentials());
+
+    let mut contents = BTreeMap::new();
+    contents.insert(
+        "42".to_string(),
+        EmailMessageContent {
+            metadata: EmailMessageMetadata {
+                id: "42".to_string(),
+                thread_id: Some("thread-42".to_string()),
+                from: Some("Alice <alice@trusted.local>".to_string()),
+                subject: Some("Invoice".to_string()),
+                date: Some("Wed, 15 Jan 2025 12:00:00 +0000".to_string()),
+                snippet: Some("Invoice attached".to_string()),
+                internal_date_ms: Some(1736942400000),
+                label_ids: vec!["INBOX".to_string()],
+            },
+            headers: BTreeMap::from([
+                (
+                    "from".to_string(),
+                    "Alice <alice@trusted.local>".to_string(),
+                ),
+                ("subject".to_string(), "Invoice".to_string()),
+            ]),
+            text_body: Some("Plain text body".to_string()),
+            html_body: Some("<p>HTML body</p>".to_string()),
+        },
+    );
+
+    let service = EmailService::mock_static_content(contents);
+    let app = make_email_app(policy, accounts, Arc::new(service));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/email/messages/42")
+        .header("authorization", "Bearer vk-email")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["metadata"]["id"], "42");
+    assert_eq!(json["headers"]["subject"], "Invoice");
+    assert_eq!(json["text_body"], "Plain text body");
+    assert_eq!(json["html_body"], "<p>HTML body</p>");
+}
+
+#[tokio::test]
+async fn test_email_message_content_rejects_invalid_id() {
+    let policy = EmailPolicy {
+        mode: EmailMode::Allowlist,
+        sender_rules: vec!["@trusted.local".to_string()],
+        default_max_results: 50,
+    };
+    let mut accounts = BTreeMap::new();
+    accounts.insert("vk-email".to_string(), test_email_credentials());
+    let service = EmailService::mock_static_content(BTreeMap::new());
+
+    let app = make_email_app(policy, accounts, Arc::new(service));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/email/messages/not-a-number")
+        .header("authorization", "Bearer vk-email")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_email_message_content_not_found() {
+    let policy = EmailPolicy {
+        mode: EmailMode::Allowlist,
+        sender_rules: vec!["@trusted.local".to_string()],
+        default_max_results: 50,
+    };
+    let mut accounts = BTreeMap::new();
+    accounts.insert("vk-email".to_string(), test_email_credentials());
+    let service = EmailService::mock_static_content(BTreeMap::new());
+
+    let app = make_email_app(policy, accounts, Arc::new(service));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/email/messages/777")
+        .header("authorization", "Bearer vk-email")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_email_message_content_filtered_sender_hidden() {
+    let policy = EmailPolicy {
+        mode: EmailMode::Allowlist,
+        sender_rules: vec!["@trusted.local".to_string()],
+        default_max_results: 50,
+    };
+    let mut accounts = BTreeMap::new();
+    accounts.insert("vk-email".to_string(), test_email_credentials());
+
+    let mut contents = BTreeMap::new();
+    contents.insert(
+        "5".to_string(),
+        EmailMessageContent {
+            metadata: EmailMessageMetadata {
+                id: "5".to_string(),
+                thread_id: None,
+                from: Some("Mallory <mallory@evil.com>".to_string()),
+                subject: Some("Blocked".to_string()),
+                date: None,
+                snippet: None,
+                internal_date_ms: None,
+                label_ids: vec!["INBOX".to_string()],
+            },
+            headers: BTreeMap::from([(
+                "from".to_string(),
+                "Mallory <mallory@evil.com>".to_string(),
+            )]),
+            text_body: Some("evil".to_string()),
+            html_body: None,
+        },
+    );
+
+    let service = EmailService::mock_static_content(contents);
+    let app = make_email_app(policy, accounts, Arc::new(service));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/email/messages/5")
+        .header("authorization", "Bearer vk-email")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_email_message_content_endpoint_disabled_returns_not_found() {
+    let mock_server = MockServer::start().await;
+    let app = make_app(&mock_server.uri());
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/email/messages/42")
         .header("authorization", "Bearer vk-test-1")
         .body(Body::empty())
         .unwrap();

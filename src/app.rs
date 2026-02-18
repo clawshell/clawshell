@@ -1,15 +1,16 @@
-use crate::config::{Config, GmailAccountConfig, Provider};
+use crate::config::{Config, Provider};
 use crate::dlp::DlpScanner;
-use crate::gmail::{
-    GmailAccountCredentials, GmailListMessagesRequest, GmailPolicy, GmailRefreshCredentials,
-    GmailService, GoogleGmailService, normalize_sender_rule,
+use crate::email::{
+    EmailAccountCredentials, EmailGetMessageRequest, EmailListMessagesRequest, EmailMessageContent,
+    EmailMessageMetadata, EmailPolicy, EmailService, EmailServiceError, ImapEmailService,
+    normalize_sender_rule,
 };
 use crate::keys::{KeyManager, ResolvedKey};
 use crate::proxy::ProxyClient;
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
@@ -17,7 +18,6 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, info, trace, warn};
@@ -27,14 +27,14 @@ pub struct AppState {
     pub key_manager: Arc<KeyManager>,
     pub dlp_scanner: Arc<DlpScanner>,
     pub proxy_client: Arc<ProxyClient>,
-    pub gmail_enabled: bool,
-    pub gmail_policy: Option<GmailPolicy>,
-    pub gmail_accounts: Arc<BTreeMap<String, GmailAccountCredentials>>,
-    pub gmail_service: Arc<GmailService>,
+    pub email_enabled: bool,
+    pub email_policy: Option<EmailPolicy>,
+    pub email_accounts: Arc<BTreeMap<String, EmailAccountCredentials>>,
+    pub email_service: Arc<EmailService>,
 }
 
 impl AppState {
-    pub fn from_config(config: &Config, config_path: Option<&Path>) -> Result<Self, String> {
+    pub fn from_config(config: &Config) -> Result<Self, String> {
         let mut upstream_urls = BTreeMap::new();
         upstream_urls.insert(Provider::Openai, config.upstream_url(Provider::Openai));
         upstream_urls.insert(
@@ -56,38 +56,46 @@ impl AppState {
             })
             .collect();
 
-        let gmail_policy = config.gmail.mode.map(|mode| {
-            let sender_rules = match mode {
-                crate::config::GmailMode::Allowlist => &config.gmail.allow_senders,
-                crate::config::GmailMode::Denylist => &config.gmail.deny_senders,
-            }
-            .iter()
-            .map(|rule| normalize_sender_rule(rule))
-            .collect();
+        let email_policy = if config.email.enabled {
+            config.email.mode.map(|mode| {
+                let sender_rules = match mode {
+                    crate::config::EmailMode::Allowlist => &config.email.allow_senders,
+                    crate::config::EmailMode::Denylist => &config.email.deny_senders,
+                }
+                .iter()
+                .map(|rule| normalize_sender_rule(rule))
+                .collect();
 
-            GmailPolicy {
-                mode,
-                sender_rules,
-                default_max_results: config.gmail.default_max_results,
-            }
-        });
-
-        let gmail_accounts: BTreeMap<String, GmailAccountCredentials> = config
-            .gmail
-            .accounts
-            .iter()
-            .map(|account| {
-                let refresh = resolve_gmail_refresh_credentials(account, config_path)
-                    .map_err(|e| format!("gmail account '{}': {e}", account.virtual_key))?;
-                Ok((
-                    account.virtual_key.clone(),
-                    GmailAccountCredentials {
-                        refresh,
-                        user_id: account.user_id.clone(),
-                    },
-                ))
+                EmailPolicy {
+                    mode,
+                    sender_rules,
+                    default_max_results: config.email.default_max_results,
+                }
             })
-            .collect::<Result<_, String>>()?;
+        } else {
+            None
+        };
+
+        let email_accounts: BTreeMap<String, EmailAccountCredentials> = if config.email.enabled {
+            config
+                .email
+                .accounts
+                .iter()
+                .map(|account| {
+                    Ok((
+                        account.virtual_key.clone(),
+                        EmailAccountCredentials {
+                            email: account.email.clone(),
+                            app_password: account.app_password.clone(),
+                            imap_host: account.imap_host.clone(),
+                            imap_port: account.imap_port,
+                        },
+                    ))
+                })
+                .collect::<Result<_, String>>()?
+        } else {
+            BTreeMap::new()
+        };
 
         Ok(Self {
             key_manager: Arc::new(KeyManager::new(key_mappings)),
@@ -99,104 +107,12 @@ impl AppState {
                 upstream_urls,
                 config.upstream.anthropic_version.clone(),
             )),
-            gmail_enabled: config.gmail.enabled,
-            gmail_policy,
-            gmail_accounts: Arc::new(gmail_accounts),
-            gmail_service: Arc::new(GmailService::Google(GoogleGmailService::new(
-                config.gmail.api_base_url.clone(),
-            ))),
+            email_enabled: config.email.enabled,
+            email_policy,
+            email_accounts: Arc::new(email_accounts),
+            email_service: Arc::new(EmailService::Imap(ImapEmailService::default())),
         })
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct GoogleClientSecretFile {
-    #[serde(default)]
-    installed: Option<GoogleClientSecretEntry>,
-    #[serde(default)]
-    web: Option<GoogleClientSecretEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GoogleClientSecretEntry {
-    #[serde(default)]
-    client_id: Option<String>,
-    #[serde(default)]
-    client_secret: Option<String>,
-    #[serde(default)]
-    token_uri: Option<String>,
-}
-
-fn resolve_gmail_refresh_credentials(
-    account: &GmailAccountConfig,
-    config_path: Option<&Path>,
-) -> Result<GmailRefreshCredentials, String> {
-    let refresh_token = account
-        .refresh_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or("missing refresh_token")?
-        .to_string();
-
-    let client_secret_file = account
-        .client_secret_file
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or("missing client_secret_file")?;
-    let resolved_path = resolve_client_secret_file_path(client_secret_file, config_path);
-    let content = std::fs::read_to_string(&resolved_path).map_err(|e| {
-        format!(
-            "failed to read client_secret_file '{}': {e}",
-            resolved_path.display()
-        )
-    })?;
-    let parsed: GoogleClientSecretFile = serde_json::from_str(&content).map_err(|e| {
-        format!(
-            "failed to parse client_secret_file '{}': {e}",
-            resolved_path.display()
-        )
-    })?;
-    let oauth = parsed
-        .installed
-        .or(parsed.web)
-        .ok_or("client_secret_file must contain either an 'installed' or 'web' object")?;
-    let client_id = oauth
-        .client_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or("client_secret_file is missing non-empty client_id")?
-        .to_string();
-    let token_uri = oauth
-        .token_uri
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("https://oauth2.googleapis.com/token")
-        .to_string();
-
-    Ok(GmailRefreshCredentials {
-        token_uri,
-        refresh_token,
-        client_id,
-        client_secret: oauth.client_secret.unwrap_or_default().trim().to_string(),
-    })
-}
-
-fn resolve_client_secret_file_path(
-    client_secret_file: &str,
-    config_path: Option<&Path>,
-) -> PathBuf {
-    let path = PathBuf::from(client_secret_file);
-    if path.is_absolute() {
-        return path;
-    }
-    if let Some(base) = config_path.and_then(Path::parent) {
-        return base.join(path);
-    }
-    path
 }
 
 /// Maximum request body size (10 MiB).
@@ -204,7 +120,8 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
-        .route("/v1/gmail/messages", get(handle_gmail_secure_messages))
+        .route("/v1/email/messages", get(handle_email_secure_messages))
+        .route("/v1/email/messages/{id}", get(handle_email_message_content))
         .route("/", any(handle_request))
         .route("/{*path}", any(handle_request))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
@@ -212,15 +129,16 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 #[derive(Debug, Deserialize)]
-struct GmailSecureMessagesQuery {
-    q: Option<String>,
-    max_results: Option<u32>,
-    page_token: Option<String>,
-    include_spam_trash: Option<bool>,
+struct EmailSecureMessagesQuery {
+    folder: Option<String>,
+    limit: Option<u32>,
+    unread_only: Option<bool>,
+    from: Option<String>,
+    subject: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-struct GmailSecureMessage {
+struct EmailSecureMessage {
     id: String,
     thread_id: Option<String>,
     from: String,
@@ -232,24 +150,37 @@ struct GmailSecureMessage {
 }
 
 #[derive(Debug, Serialize)]
-struct GmailSecureMessagesResponse {
-    messages: Vec<GmailSecureMessage>,
+struct EmailSecureMessagesResponse {
+    messages: Vec<EmailSecureMessage>,
     next_page_token: Option<String>,
 }
 
-async fn handle_gmail_secure_messages(
+#[derive(Debug, Deserialize)]
+struct EmailMessageContentPath {
+    id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EmailMessageContentResponse {
+    metadata: EmailMessageMetadata,
+    headers: BTreeMap<String, String>,
+    text_body: Option<String>,
+    html_body: Option<String>,
+}
+
+async fn handle_email_secure_messages(
     State(state): State<AppState>,
-    Query(query): Query<GmailSecureMessagesQuery>,
+    Query(query): Query<EmailSecureMessagesQuery>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Response> {
     let method = axum::http::Method::GET;
-    let path = "/v1/gmail/messages";
+    let path = "/v1/email/messages";
 
-    if !state.gmail_enabled {
-        warn!(method = %method, path = %path, "Gmail endpoint is disabled");
+    if !state.email_enabled {
+        warn!(method = %method, path = %path, "Email endpoint is disabled");
         return Err(error_response(
             StatusCode::NOT_FOUND,
-            "Gmail secure endpoint is disabled",
+            "Email secure endpoint is disabled",
         ));
     }
 
@@ -272,45 +203,54 @@ async fn handle_gmail_secure_messages(
             )
         })?;
 
-    let account = state.gmail_accounts.get(&virtual_key).ok_or_else(|| {
+    let account = state.email_accounts.get(&virtual_key).ok_or_else(|| {
         warn!(
             method = %method,
             path = %path,
             virtual_key = %virtual_key,
-            "Virtual key is not authorized for Gmail"
+            "Virtual key is not authorized for Email"
         );
         error_response(StatusCode::UNAUTHORIZED, "Unknown API key")
     })?;
 
-    let policy = state.gmail_policy.as_ref().ok_or_else(|| {
+    let policy = state.email_policy.as_ref().ok_or_else(|| {
         error!(
             method = %method,
             path = %path,
-            "Gmail endpoint enabled without an active sender policy"
+            "Email endpoint enabled without an active sender policy"
         );
         error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Gmail policy configuration error",
+            "Email policy configuration error",
         )
     })?;
 
-    let max_results = query.max_results.unwrap_or(policy.default_max_results);
+    let max_results = query.limit.unwrap_or(policy.default_max_results);
     if max_results == 0 || max_results > 100 {
         return Err(error_response(
             StatusCode::BAD_REQUEST,
-            "max_results must be between 1 and 100",
+            "limit must be between 1 and 100",
         ));
     }
 
-    let service_request = GmailListMessagesRequest {
-        q: query.q.clone(),
+    let folder = query
+        .folder
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("INBOX")
+        .to_string();
+
+    let service_request = EmailListMessagesRequest {
+        folder,
         max_results,
-        page_token: query.page_token.clone(),
-        include_spam_trash: query.include_spam_trash.unwrap_or(false),
+        unread_only: query.unread_only.unwrap_or(false),
+        from_contains: query.from.clone(),
+        subject_contains: query.subject.clone(),
     };
 
-    let gmail_response = state
-        .gmail_service
+    let email_response = state
+        .email_service
         .list_message_metadata(&virtual_key, account, &service_request)
         .await
         .map_err(|e| {
@@ -319,20 +259,20 @@ async fn handle_gmail_secure_messages(
                 path = %path,
                 virtual_key = %virtual_key,
                 error = %e,
-                "Failed to fetch Gmail messages"
+                "Failed to fetch Email messages"
             );
-            error_response(StatusCode::BAD_GATEWAY, "Failed to fetch Gmail messages")
+            error_response(StatusCode::BAD_GATEWAY, "Failed to fetch Email messages")
         })?;
 
     let mut visible_messages = Vec::new();
-    for message in gmail_response.messages {
+    for message in email_response.messages {
         let Some(from_header) = message.from.as_deref() else {
             continue;
         };
         if !policy.sender_visible(from_header) {
             continue;
         }
-        visible_messages.push(GmailSecureMessage {
+        visible_messages.push(EmailSecureMessage {
             id: message.id,
             thread_id: message.thread_id,
             from: from_header.to_string(),
@@ -344,9 +284,125 @@ async fn handle_gmail_secure_messages(
         });
     }
 
-    let response = GmailSecureMessagesResponse {
+    let response = EmailSecureMessagesResponse {
         messages: visible_messages,
-        next_page_token: gmail_response.next_page_token,
+        next_page_token: email_response.next_page_token,
+    };
+
+    Ok(axum::Json(response).into_response())
+}
+
+async fn handle_email_message_content(
+    State(state): State<AppState>,
+    Path(path_params): Path<EmailMessageContentPath>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, Response> {
+    let method = axum::http::Method::GET;
+    let path = "/v1/email/messages/{id}";
+
+    if !state.email_enabled {
+        warn!(method = %method, path = %path, "Email endpoint is disabled");
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "Email secure endpoint is disabled",
+        ));
+    }
+
+    let auth_header = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            warn!(method = %method, path = %path, "Missing Authorization header");
+            error_response(StatusCode::UNAUTHORIZED, "Missing Authorization header")
+        })?;
+
+    let virtual_key = KeyManager::extract_virtual_key(&auth_header)
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            warn!(method = %method, path = %path, "Invalid Authorization header format");
+            error_response(
+                StatusCode::UNAUTHORIZED,
+                "Invalid Authorization header format. Expected: Bearer <key>",
+            )
+        })?;
+
+    let account = state.email_accounts.get(&virtual_key).ok_or_else(|| {
+        warn!(
+            method = %method,
+            path = %path,
+            virtual_key = %virtual_key,
+            "Virtual key is not authorized for Email"
+        );
+        error_response(StatusCode::UNAUTHORIZED, "Unknown API key")
+    })?;
+
+    let policy = state.email_policy.as_ref().ok_or_else(|| {
+        error!(
+            method = %method,
+            path = %path,
+            "Email endpoint enabled without an active sender policy"
+        );
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Email policy configuration error",
+        )
+    })?;
+
+    let message_id = path_params.id.trim();
+    if message_id.is_empty() || message_id.parse::<u64>().is_err() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid message id",
+        ));
+    }
+
+    let service_request = EmailGetMessageRequest {
+        folder: "INBOX".to_string(),
+        message_id: message_id.to_string(),
+    };
+
+    let content: EmailMessageContent = state
+        .email_service
+        .get_message_content(&virtual_key, account, &service_request)
+        .await
+        .map_err(|error| match error {
+            EmailServiceError::NotFound(_) => {
+                error_response(StatusCode::NOT_FOUND, "Email message not found")
+            }
+            other => {
+                error!(
+                    method = %method,
+                    path = %path,
+                    virtual_key = %virtual_key,
+                    message_id = %message_id,
+                    error = %other,
+                    "Failed to fetch Email message content"
+                );
+                error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "Failed to fetch Email message content",
+                )
+            }
+        })?;
+
+    let from_header = content
+        .metadata
+        .from
+        .as_deref()
+        .or_else(|| content.headers.get("from").map(String::as_str));
+    if from_header.is_none_or(|from| !policy.sender_visible(from)) {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "Email message not found",
+        ));
+    }
+
+    let response = EmailMessageContentResponse {
+        metadata: content.metadata,
+        headers: content.headers,
+        text_body: content.text_body,
+        html_body: content.html_body,
     };
 
     Ok(axum::Json(response).into_response())

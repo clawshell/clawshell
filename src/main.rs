@@ -6,7 +6,7 @@ mod app;
 mod cli;
 mod config;
 mod dlp;
-mod gmail;
+mod email;
 mod keys;
 mod migration;
 mod onboard;
@@ -108,15 +108,6 @@ fn paths_equivalent(left: &Path, right: &Path) -> bool {
     canonicalize_or_original(left) == canonicalize_or_original(right)
 }
 
-fn resolve_config_relative_path(config_dir: &Path, configured_path: &str) -> PathBuf {
-    let path = PathBuf::from(configured_path);
-    if path.is_absolute() {
-        path
-    } else {
-        config_dir.join(path)
-    }
-}
-
 fn try_read_openclaw_config_path(clawshell_config_file: &Path) -> Option<PathBuf> {
     let config_content = std::fs::read_to_string(clawshell_config_file).ok()?;
     let config_json = serde_json::from_str::<serde_json::Value>(&config_content).ok()?;
@@ -126,56 +117,10 @@ fn try_read_openclaw_config_path(clawshell_config_file: &Path) -> Option<PathBuf
         .map(PathBuf::from)
 }
 
-fn write_onboard_gmail_client_secret_file(
-    config_dir: &Path,
-    ob_config: &crate::onboard::OnboardConfig,
-) -> Result<Option<PathBuf>, Box<dyn Error>> {
-    let Some(gmail) = ob_config.gmail.as_ref() else {
-        return Ok(None);
-    };
-
-    let secret_path = resolve_config_relative_path(config_dir, &gmail.client_secret_file);
-    if let Some(parent) = secret_path.parent() {
-        std::fs::create_dir_all(parent)?;
-        if let Err(error) = platform::set_mode(parent, 0o700) {
-            warn!(
-                error = %error,
-                path = %parent.display(),
-                "Failed to set Gmail OAuth directory permissions"
-            );
-        }
-        if let Err(error) = platform::set_owner(parent, false) {
-            warn!(
-                error = %error,
-                path = %parent.display(),
-                "Failed to set Gmail OAuth directory owner"
-            );
-        }
-    }
-
-    std::fs::write(&secret_path, &gmail.client_secret_json)?;
-    if let Err(error) = platform::set_mode(&secret_path, 0o600) {
-        warn!(
-            error = %error,
-            path = %secret_path.display(),
-            "Failed to set Gmail OAuth file permissions"
-        );
-    }
-    if let Err(error) = platform::set_owner(&secret_path, false) {
-        warn!(
-            error = %error,
-            path = %secret_path.display(),
-            "Failed to set Gmail OAuth file owner"
-        );
-    }
-
-    Ok(Some(secret_path))
-}
-
 fn write_onboard_openclaw_skill(
     ob_config: &crate::onboard::OnboardConfig,
 ) -> Result<Option<PathBuf>, Box<dyn Error>> {
-    let Some(skill) = onboard::render_openclaw_gmail_messages_skill(ob_config) else {
+    let Some(skill) = onboard::render_openclaw_email_messages_skill(ob_config) else {
         return Ok(None);
     };
 
@@ -420,7 +365,7 @@ async fn cmd_start_inner(
     ensure_config_migrated(&path)?;
     let config = Config::from_file(&path)
         .map_err(|e| format!("Failed to load configuration from '{}': {}", config_path, e))?;
-    let app_state = AppState::from_config(&config, Some(&path))
+    let app_state = AppState::from_config(&config)
         .map_err(|e| format!("Failed to initialize app state: {e}"))?;
 
     tui::print_success("Configuration validated successfully.");
@@ -964,7 +909,6 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     let toml_config_path = config_dir.join("clawshell.toml");
     let toml_content = onboard::generate_clawshell_config(&ob_config);
     std::fs::write(&toml_config_path, &toml_content)?;
-    let gmail_secret_path = write_onboard_gmail_client_secret_file(&config_dir, &ob_config)?;
 
     let config_json = serde_json::json!({
         "real_api_key": ob_config.real_api_key,
@@ -1003,9 +947,6 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
             path = %toml_config_path.display(),
             "Failed to set clawshell.toml owner"
         );
-    }
-    if let Some(path) = gmail_secret_path {
-        tui::print_info("Gmail OAuth file", &path.display().to_string());
     }
     tui::print_step_done(5, TOTAL_STEPS, "Configuration written");
 
@@ -1123,8 +1064,8 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     tui::print_info("Model", &ob_config.model);
     tui::print_info("Virtual Key", &ob_config.virtual_api_key);
     tui::print_info(
-        "Gmail",
-        if ob_config.gmail.is_some() {
+        "Email",
+        if ob_config.email.is_some() {
             "configured"
         } else {
             "not configured"
@@ -1309,7 +1250,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     let openclaw_skill_dir = openclaw_path.as_ref().map(|path| {
         onboard::openclaw_config_root(path)
             .join("skills")
-            .join(onboard::OPENCLAW_GMAIL_MESSAGES_SKILL_NAME)
+            .join(onboard::OPENCLAW_EMAIL_MESSAGES_SKILL_NAME)
     });
 
     tui::print_warning("This will remove the following:");

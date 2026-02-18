@@ -30,7 +30,7 @@ inquire = "0.9.3"
 console = "0.16.2"
 vfs = "0.12"
 thiserror = "2"
-google-gmail1 = "7.0.0"
+rustls-native-certs = "0.8.3"
 
 [dev-dependencies]
 tokio = { version = "1.49", features = ["full", "test-util"] }

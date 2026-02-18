@@ -4,7 +4,7 @@ use inquire::ui::{Attributes, Color, RenderConfig, StyleSheet, Styled};
 use inquire::validator::StringValidator;
 use inquire::{Confirm, InquireError, Password, Select, Text};
 use std::fmt::Display;
-use std::io::{BufRead, Write};
+use std::io::Write;
 
 // Theme color RGB values
 const THEME_R: u8 = 236;
@@ -222,35 +222,6 @@ pub fn prompt_select<T: Display>(message: &str, options: Vec<T>) -> Result<T, In
     Select::new(message, options)
         .with_render_config(theme())
         .prompt()
-}
-
-pub fn prompt_multiline(
-    message: &str,
-    terminator: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let prompt_prefix = theme_style().apply_to("?");
-    let term = theme_style().apply_to(terminator);
-    println!("{prompt_prefix} {message}");
-    println!("  End input with a line containing only {term}");
-
-    let stdin = std::io::stdin();
-    let mut reader = stdin.lock();
-    let mut buf = String::new();
-    let mut collected = String::new();
-
-    loop {
-        buf.clear();
-        let bytes = reader.read_line(&mut buf)?;
-        if bytes == 0 {
-            break;
-        }
-        if buf.trim_end_matches(['\r', '\n']) == terminator {
-            break;
-        }
-        collected.push_str(&buf);
-    }
-
-    Ok(collected)
 }
 
 #[cfg(test)]
