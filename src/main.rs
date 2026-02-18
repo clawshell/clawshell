@@ -10,6 +10,7 @@ mod email;
 mod keys;
 mod migration;
 mod onboard;
+mod openclaw_cli;
 mod platform;
 mod process;
 mod proxy;
@@ -876,45 +877,30 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     // OpenClaw config path was already asked in step 4
     let openclaw_path = &ob_config.openclaw_config_path;
 
-    // Step 7 & 8: Backup and modify OpenClaw configuration
-    let actual_backup_path;
-    if openclaw_path.exists() {
-        tui::print_step(7, TOTAL_STEPS, "Backing up OpenClaw configuration...");
-        actual_backup_path = Some(onboard::backup_openclaw_config(openclaw_path)?);
+    // Step 7: Backup OpenClaw configuration file if present.
+    tui::print_step(7, TOTAL_STEPS, "Backing up OpenClaw configuration...");
+    let actual_backup_path = if openclaw_path.exists() {
+        let backup = onboard::backup_openclaw_config(openclaw_path)?;
         tui::print_step_done(7, TOTAL_STEPS, "OpenClaw config backed up");
-        tui::print_info(
-            "Backup",
-            &actual_backup_path.as_ref().unwrap().display().to_string(),
-        );
-
-        tui::print_step(8, TOTAL_STEPS, "Updating OpenClaw configuration...");
-        let openclaw_content = std::fs::read_to_string(openclaw_path)?;
-        let modified_content = onboard::modify_openclaw_config(&openclaw_content, &ob_config)?;
-        std::fs::write(openclaw_path, &modified_content)?;
-        if let Some(skill_path) = openclaw_skill_path.as_ref() {
-            align_owner_with_openclaw_path(skill_path, openclaw_path)?;
-        }
-        tui::print_step_done(8, TOTAL_STEPS, "OpenClaw config updated");
+        tui::print_info("Backup", &backup.display().to_string());
+        Some(backup)
     } else {
-        actual_backup_path = None;
+        tui::print_step_done(7, TOTAL_STEPS, "OpenClaw config backup skipped");
         tui::print_warning(&format!(
             "OpenClaw config not found at: {}",
             openclaw_path.display()
         ));
+        None
+    };
 
-        if let Some(parent) = openclaw_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        tui::print_step(8, TOTAL_STEPS, "Creating new OpenClaw configuration...");
-        let modified_content = onboard::modify_openclaw_config("{}", &ob_config)?;
-        std::fs::write(openclaw_path, &modified_content)?;
-        if let Some(skill_path) = openclaw_skill_path.as_ref() {
-            align_owner_with_openclaw_path(skill_path, openclaw_path)?;
-        }
-        tui::print_step_done(8, TOTAL_STEPS, "OpenClaw config created");
-        tui::print_info("Path", &openclaw_path.display().to_string());
+    // Step 8: Update OpenClaw configuration via OpenClaw CLI.
+    tui::print_step(8, TOTAL_STEPS, "Updating OpenClaw configuration...");
+    let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
+    openclaw_cli::apply_onboard_openclaw_config(&mut openclaw_runner, &ob_config)?;
+    if let Some(skill_path) = openclaw_skill_path.as_ref() {
+        align_owner_with_openclaw_path(skill_path, openclaw_path)?;
     }
+    tui::print_step_done(8, TOTAL_STEPS, "OpenClaw config updated");
 
     // Auto-start service setup (ask before step 9 so we can start via service manager)
     let exe = std::env::current_exe()?;
@@ -1032,27 +1018,20 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     )
     .unwrap_or(false);
 
-    // Run openclaw commands as the original (non-root) user so that
-    // openclaw config files are owned by the right user and readable.
-    let sudo_user = std::env::var("SUDO_USER").ok();
-
     if set_model {
-        let status = if let Some(ref user) = sudo_user {
-            std::process::Command::new("sudo")
-                .args(["-u", user, "openclaw", "models", "set", "clawshell"])
-                .status()
-        } else {
-            std::process::Command::new("openclaw")
-                .args(["models", "set", "clawshell"])
-                .status()
-        };
-        match status {
-            Ok(s) if s.success() => tui::print_success("Default model set to clawshell."),
-            Ok(s) => tui::print_error(&format!(
+        let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
+        match openclaw_cli::run_openclaw_command(
+            &mut openclaw_runner,
+            &["models", "set", "clawshell"],
+        ) {
+            Ok(output) if output.success => tui::print_success("Default model set to clawshell."),
+            Ok(output) => tui::print_error(&format!(
                 "Failed to set default model (exit code {}).",
-                s.code().unwrap_or(-1)
+                output.status_code.unwrap_or(-1)
             )),
-            Err(e) => tui::print_error(&format!("Failed to run 'openclaw models set': {e}")),
+            Err(error) => tui::print_error(&format!(
+                "Failed to run 'openclaw models set clawshell': {error}"
+            )),
         }
     } else {
         tui::print_info(
@@ -1069,22 +1048,16 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     .unwrap_or(false);
 
     if restart_gw {
-        let status = if let Some(ref user) = sudo_user {
-            std::process::Command::new("sudo")
-                .args(["-u", user, "openclaw", "gateway", "restart"])
-                .status()
-        } else {
-            std::process::Command::new("openclaw")
-                .args(["gateway", "restart"])
-                .status()
-        };
-        match status {
-            Ok(s) if s.success() => tui::print_success("OpenClaw gateway restarted."),
-            Ok(s) => tui::print_error(&format!(
+        let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
+        match openclaw_cli::run_openclaw_command(&mut openclaw_runner, &["gateway", "restart"]) {
+            Ok(output) if output.success => tui::print_success("OpenClaw gateway restarted."),
+            Ok(output) => tui::print_error(&format!(
                 "Failed to restart gateway (exit code {}).",
-                s.code().unwrap_or(-1)
+                output.status_code.unwrap_or(-1)
             )),
-            Err(e) => tui::print_error(&format!("Failed to run 'openclaw gateway restart': {e}")),
+            Err(error) => tui::print_error(&format!(
+                "Failed to run 'openclaw gateway restart': {error}"
+            )),
         }
     } else {
         tui::print_info(
@@ -1195,23 +1168,22 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(openclaw_path) = openclaw_path.as_ref()
         && openclaw_path.exists()
     {
-        let openclaw_content = std::fs::read_to_string(openclaw_path)?;
-
-        // Guard: reject uninstall if clawshell is the default model
-        if crate::onboard::is_clawshell_default_model(&openclaw_content)? {
-            tui::print_error("ClawShell model is currently set as the default model in OpenClaw.");
-            tui::print_error(&format!(
-                "Please change the default model in {} before uninstalling.",
-                openclaw_path.display()
-            ));
-            std::process::exit(1);
-        }
-
-        // Remove clawshell entries from OpenClaw config
         tui::print_info("Action", "Cleaning up OpenClaw configuration...");
-        let cleaned = crate::onboard::remove_openclaw_entries(&openclaw_content)?;
-        std::fs::write(openclaw_path, cleaned)?;
-        tui::print_success("OpenClaw configuration cleaned up.");
+        let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
+        match openclaw_cli::cleanup_openclaw_for_uninstall(&mut openclaw_runner)? {
+            openclaw_cli::UninstallCleanupOutcome::BlockedByDefaultModel => {
+                tui::print_error(
+                    "ClawShell model is currently set as the default model in OpenClaw.",
+                );
+                tui::print_error(
+                    "Please change the default model (for example, with `openclaw models set <model>`) before uninstalling.",
+                );
+                std::process::exit(1);
+            }
+            openclaw_cli::UninstallCleanupOutcome::Cleaned => {
+                tui::print_success("OpenClaw configuration cleaned up.");
+            }
+        }
     }
 
     // 0b. Remove ClawShell-managed OpenClaw skill if present.

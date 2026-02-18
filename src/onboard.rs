@@ -915,7 +915,7 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
         .as_deref()
         .unwrap_or(&fallback_openclaw_path);
     let openclaw_config_path = tui::prompt_text(
-        "Enter the OpenClaw configuration file path",
+        "Enter the OpenClaw configuration file path (for backup/recovery)",
         Some(default_openclaw),
     )?;
 
@@ -1299,6 +1299,7 @@ pub fn modify_openclaw_config(
 /// Check if the OpenClaw config has a default model referencing clawshell.
 ///
 /// Returns true if `agents.defaults.model` starts with `"clawshell/"` or equals `"clawshell"`.
+#[cfg(test)]
 pub fn is_clawshell_default_model(content: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let json: Value = serde_json::from_str(content)?;
 
