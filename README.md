@@ -71,7 +71,7 @@ ClawShell supports sender-based email filtering so each virtual key only sees ma
   │              │             ║  │  DLP scan                 │                 │ Anthropic/ │
   │ holds only   │  RESPONSE   ║  │  real-key mapping         │   RESPONSE      │ OpenRouter │
   │ virtual keys │◄────────────║◄─┤  email sender filtering   │◄────────────────┤            │
-  │              │             ║  │                           │                 │            │
+  │              │             ║  │                           │                 └────────────┘
   │              │  EMAIL GET  ║  │                           │   IMAP fetch    ┌────────────┐
   │              ├───(virtual──║  |                           |───(real key)───►|            |
   │              │    key)     ║  │                           │                 │ IMAP       │
