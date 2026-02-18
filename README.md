@@ -12,7 +12,7 @@
 
 ## 📖 Introduction
 
-**ClawShell** is a security-privileged process for the **OpenClaw** ecosystem. It sits between OpenClaw and upstream LLM API providers (OpenAI, Anthropic), performing virtual-to-real API key mapping and DLP (Data Loss Prevention) scanning on request and response bodies. It can also expose an Email read endpoint with sender allowlist/denylist filtering.
+**ClawShell** is a security-privileged process for the **OpenClaw** ecosystem. It sits between OpenClaw and upstream LLM API providers (OpenAI, Anthropic, OpenRouter), performing virtual-to-real API key mapping and DLP (Data Loss Prevention) scanning on request and response bodies. It can also expose an Email read endpoint with sender allowlist/denylist filtering.
 
 OpenClaw never holds real API keys, only virtual keys that ClawShell swaps for real ones before forwarding requests upstream. Real keys are stored in a privileged config directory (`/etc/clawshell`) protected by Unix file system permissions.
 
@@ -67,9 +67,9 @@ ClawShell supports sender-based email filtering so each virtual key only sees ma
                                ║  ┌──────────┴────────────────┐
   ┌──────────────┐  REQUEST    ║  │                           │   REQUEST       ┌────────────┐
   │              ├──(virtual───╫─►│       ClawShell           ├──-(real key,───►│            │
-  │   OpenClaw   │   key)      ║  │                           │   PII redacted) │   OpenAI   │
-  │              │             ║  │  DLP scan                 │                 │     or     │
-  │ holds only   │  RESPONSE   ║  │  real-key mapping         │   RESPONSE      │  Anthropic │
+  │   OpenClaw   │   key)      ║  │                           │   PII redacted) │  OpenAI /  │
+  │              │             ║  │  DLP scan                 │                 │ Anthropic/ │
+  │ holds only   │  RESPONSE   ║  │  real-key mapping         │   RESPONSE      │ OpenRouter │
   │ virtual keys │◄────────────║◄─┤  email sender filtering   │◄────────────────┤            │
   │              │             ║  │                           │                 │            │
   │              │  EMAIL GET  ║  │                           │   IMAP fetch    ┌────────────┐
