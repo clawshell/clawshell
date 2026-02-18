@@ -33,17 +33,13 @@ ClawShell scans HTTP request and response bodies for sensitive data using config
 - **Response Scanning**: Optionally scans upstream responses and redacts detected PII before returning to OpenClaw. Streaming (SSE) responses are passed through without scanning.
 - **Custom Patterns**: Define sensitive data patterns using regex in the TOML config, each with a `block` or `redact` action.
 
-### 3. Email Sender Filtering Endpoint
+### 3. Sensitive Email Isolation
 
-ClawShell can expose Email endpoints to fetch message lists and message content with sender policy filtering.
+ClawShell supports sender-based email filtering so each virtual key only sees mailbox content based on sender rules.
 
-- **Explicit Mode**: Configure `email.mode = "allowlist"` or `email.mode = "denylist"` to avoid ambiguous behavior.
-- **Per-Key Email Credentials**: Map virtual keys to Email IMAP credentials under `[[email.accounts]]` using `email`, `app_password`, `imap_host`, and `imap_port`.
-- **Provider Choices in Onboarding**: Built-in Gmail and Outlook presets are supported, plus manual IMAP host/port input for other providers.
-- **Endpoints**:
-  - `GET /v1/email/messages` returns filtered message metadata.
-  - `GET /v1/email/messages/{id}` returns message `metadata`, `headers`, `text_body`, and `html_body`.
-- **Sender Rules**: Supports exact email rules (`alice@example.com`) and domain rules (`@example.com`).
+- **Sender Filtering**: Filter emails by sender.
+- **Key Isolation**: IMAP credentials are stored in `/etc/clawshell/clawshell.toml`, readable only by the `clawshell` system user. OpenClaw holds only virtual keys.
+- **Provider Support**: Built-in Gmail and Outlook presets, with manual IMAP setup for other providers.
 
 ### 4. Seamless Integration
 
@@ -60,26 +56,38 @@ ClawShell can expose Email endpoints to fetch message lists and message content 
 ```
                                ║ security boundary (Unix File System Permissions)
                                ║
-                               ║  ┌────────────────────┐
-                               ║  │  /etc/clawshell    │
-                               ║  │  ┄ real API keys   │
-                               ║  │  ┄ DLP patterns    │
-                               ║  └────────┬───────────┘
-                               ║     reads │
-                               ║  ┌────────┴───────────┐
-  ┌──────────────┐  REQUEST    ║  │                    │   REQUEST       ┌────────────┐
-  │              ├──(virtual───╫─►│    ClawShell       ├──-(real key,───►│            │
-  │   OpenClaw   │   key)      ║  │                    │   PII redacted) │   OpenAI   │
-  │              │             ║  │  DLP scan          │                 │     or     │
-  │ holds only   │  RESPONSE   ║  │  real-key mapping  │   RESPONSE      │  Anthropic │
-  │ virtual keys │◄────────────║◄─┤                    │◄────────────────┤            │
-  │              │             ║  │                    │                 │            │
-  └──────────────┘             ║  └────────────────────┘                 └────────────┘
-                               ║
+                               ║  ┌───────────────────────────┐
+                               ║  │  /etc/clawshell           │
+                               ║  │  ┄ real API keys          │
+                               ║  │  ┄ DLP patterns           │
+                               ║  │  ┄ email sender rules     │
+                               ║  │  ┄ IMAP account creds     │
+                               ║  └──────────┬────────────────┘
+                               ║       reads │
+                               ║  ┌──────────┴────────────────┐
+  ┌──────────────┐  REQUEST    ║  │                           │   REQUEST       ┌────────────┐
+  │              ├──(virtual───╫─►│       ClawShell           ├──-(real key,───►│            │
+  │   OpenClaw   │   key)      ║  │                           │   PII redacted) │   OpenAI   │
+  │              │             ║  │  DLP scan                 │                 │     or     │
+  │ holds only   │  RESPONSE   ║  │  real-key mapping         │   RESPONSE      │  Anthropic │
+  │ virtual keys │◄────────────║◄─┤  email sender filtering   │◄────────────────┤            │
+  │              │             ║  │                           │                 │            │
+  │              │  EMAIL GET  ║  │                           │   IMAP fetch    ┌────────────┐
+  │              ├───(virtual──║  |                           |───(real key)───►|            |
+  │              │    key)     ║  │                           │                 │ IMAP       │
+  │              │             ║  │                           │                 | Provider   │
+  │              │             ║  │                           │    RESPONSE     │ Gmail /    │
+  │              │  filtered   ║  │                           │◄────────────────│ Outlook /  │
+  │              │◄────────────║◄─|                           |                 │ custom     │
+  └──────────────┘             ║  |                           |                 └────────────┘
+                               ║  └───────────────────────────┘
 ```
 
 OpenClaw only holds virtual keys and cannot access the real API keys stored in the privileged config.
+
 ClawShell swaps virtual keys for real ones and scans for PII before forwarding requests upstream.
+
+ClawShell also enforces sender-based filtering before returning email data.
 
 ## Installation
 
@@ -207,7 +215,7 @@ scan_responses = false
 patterns = [
     { name = "ssn",       regex = '\b\d{3}-\d{2}-\d{4}\b',          action = "redact" },
     { name = "visa_card", regex = '\b4[0-9]{12}(?:[0-9]{3})?\b',    action = "redact" },
-    { name = "amex_card", regex = '\b3[47][0-9]{13}\b',              action = "redact" },
+    { name = "amex_card", regex = '\b3[47][0-9]{13}\b',             action = "redact" },
 ]
 
 # Email secure endpoint
