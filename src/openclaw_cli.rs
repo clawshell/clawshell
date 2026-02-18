@@ -138,7 +138,7 @@ pub fn cleanup_openclaw_for_uninstall<R: OpenclawRunner>(
         return Ok(UninstallCleanupOutcome::BlockedByDefaultModel);
     }
 
-    let current_json = build_partial_config_for_mutation(runner)?;
+    let current_json = build_partial_config_for_cleanup(runner)?;
     let current_content = serde_json::to_string(&current_json)?;
     let cleaned_content = onboard::remove_openclaw_entries(&current_content)?;
     let cleaned_json: Value = serde_json::from_str(&cleaned_content)?;
@@ -149,11 +149,7 @@ pub fn cleanup_openclaw_for_uninstall<R: OpenclawRunner>(
         "agents.defaults.models",
         &nested_value_or_empty_object(&cleaned_json, &["agents", "defaults", "models"]),
     )?;
-    openclaw_config_set_json(
-        runner,
-        "models.providers",
-        &nested_value_or_empty_object(&cleaned_json, &["models", "providers"]),
-    )?;
+    openclaw_config_unset_path_if_exists(runner, "models.providers.clawshell")?;
     Ok(UninstallCleanupOutcome::Cleaned)
 }
 
@@ -173,6 +169,22 @@ fn build_partial_config_for_mutation<R: OpenclawRunner>(
         },
         "models": {
             "providers": providers,
+        }
+    }))
+}
+
+fn build_partial_config_for_cleanup<R: OpenclawRunner>(
+    runner: &mut R,
+) -> Result<Value, Box<dyn Error>> {
+    let env = openclaw_config_get_object_at_path_or_empty(runner, "env")?;
+    let default_models =
+        openclaw_config_get_object_at_path_or_empty(runner, "agents.defaults.models")?;
+    Ok(serde_json::json!({
+        "env": env,
+        "agents": {
+            "defaults": {
+                "models": default_models,
+            }
         }
     }))
 }
@@ -635,16 +647,13 @@ mod tests {
         runner.responses.push_back(ok_output(
             r#"{"clawshell/gpt-5":{"alias":"clawshell"},"existing/model":{"alias":"existing"}}"#,
         ));
-        runner.responses.push_back(ok_output(
-            r#"{"clawshell":{"baseUrl":"http://127.0.0.1:18790/v1"},"openai":{"baseUrl":"https://api.openai.com/v1"}}"#,
-        ));
         runner.responses.push_back(ok_output(""));
         runner.responses.push_back(ok_output(""));
         runner.responses.push_back(ok_output(""));
 
         let outcome = cleanup_openclaw_for_uninstall(&mut runner).unwrap();
         assert_eq!(outcome, UninstallCleanupOutcome::Cleaned);
-        assert_eq!(runner.calls.len(), 7);
+        assert_eq!(runner.calls.len(), 6);
         assert_eq!(
             runner.calls[0],
             vec!["config", "get", "agents.defaults.model", "--json"]
@@ -656,24 +665,19 @@ mod tests {
         );
         assert_eq!(
             runner.calls[3],
-            vec!["config", "get", "models.providers", "--json"]
-        );
-        assert_eq!(
-            runner.calls[4],
             vec!["config", "unset", "env.CLAWSHELL_API_KEY"]
         );
-        assert_eq!(runner.calls[5][2], "agents.defaults.models");
-        assert_eq!(runner.calls[6][2], "models.providers");
+        assert_eq!(runner.calls[4][0], "config");
+        assert_eq!(runner.calls[4][1], "set");
+        assert_eq!(runner.calls[4][2], "agents.defaults.models");
+        assert_eq!(
+            runner.calls[5],
+            vec!["config", "unset", "models.providers.clawshell"]
+        );
 
-        let models_payload: Value = serde_json::from_str(&runner.calls[5][3]).unwrap();
+        let models_payload: Value = serde_json::from_str(&runner.calls[4][3]).unwrap();
         assert_eq!(models_payload["existing/model"]["alias"], "existing");
         assert!(models_payload.get("clawshell/gpt-5").is_none());
-
-        let providers_payload: Value = serde_json::from_str(&runner.calls[6][3]).unwrap();
-        assert_eq!(
-            providers_payload["openai"]["baseUrl"],
-            "https://api.openai.com/v1"
-        );
-        assert!(providers_payload.get("clawshell").is_none());
+        assert_eq!(runner.calls[4][4], "--json");
     }
 }
