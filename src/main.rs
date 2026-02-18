@@ -253,6 +253,165 @@ fn print_openclaw_recovery_notice(openclaw_path: &Path, backup_path: &Path) {
     tui::print_callout("Recovery", &line_refs);
 }
 
+fn preview_matching_openclaw_config_env_removals(
+    openclaw_path: &Path,
+    mapped_real_key: &str,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    if !openclaw_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = std::fs::read_to_string(openclaw_path)?;
+    let json: serde_json::Value = serde_json::from_str(&content)?;
+    let Some(env) = json.get("env").and_then(serde_json::Value::as_object) else {
+        return Ok(Vec::new());
+    };
+
+    let mut removals: Vec<String> = env
+        .iter()
+        .filter_map(|(key, value)| {
+            let is_legacy = matches!(
+                key.as_str(),
+                "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" | "ANTHROPIC_OAUTH_TOKEN"
+            );
+            if !is_legacy {
+                return None;
+            }
+            value
+                .as_str()
+                .is_some_and(|v| v.trim() == mapped_real_key)
+                .then(|| format!("env.{key}"))
+        })
+        .collect();
+    removals.sort_unstable();
+    Ok(removals)
+}
+
+#[derive(Debug, Clone)]
+struct OpenclawConfigMutationPreview {
+    env_after: serde_json::Value,
+    default_models_after: serde_json::Value,
+    providers_after: serde_json::Value,
+    env_removals: Vec<String>,
+}
+
+fn json_object_at_pointer_or_empty(json: &serde_json::Value, pointer: &str) -> serde_json::Value {
+    json.pointer(pointer)
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn build_openclaw_config_mutation_preview(
+    openclaw_path: &Path,
+    ob_config: &onboard::OnboardConfig,
+) -> Result<OpenclawConfigMutationPreview, Box<dyn Error>> {
+    let current_json = if openclaw_path.exists() {
+        let content = std::fs::read_to_string(openclaw_path)?;
+        serde_json::from_str::<serde_json::Value>(&content)?
+    } else {
+        serde_json::json!({})
+    };
+
+    let partial_json = serde_json::json!({
+        "env": json_object_at_pointer_or_empty(&current_json, "/env"),
+        "agents": {
+            "defaults": {
+                "models": json_object_at_pointer_or_empty(&current_json, "/agents/defaults/models")
+            }
+        },
+        "models": {
+            "providers": json_object_at_pointer_or_empty(&current_json, "/models/providers")
+        }
+    });
+    let partial_content = serde_json::to_string(&partial_json)?;
+    let modified_content = onboard::modify_openclaw_config(&partial_content, ob_config)?;
+    let modified_json: serde_json::Value = serde_json::from_str(&modified_content)?;
+
+    Ok(OpenclawConfigMutationPreview {
+        env_after: json_object_at_pointer_or_empty(&modified_json, "/env"),
+        default_models_after: json_object_at_pointer_or_empty(
+            &modified_json,
+            "/agents/defaults/models",
+        ),
+        providers_after: json_object_at_pointer_or_empty(&modified_json, "/models/providers"),
+        env_removals: preview_matching_openclaw_config_env_removals(
+            openclaw_path,
+            &ob_config.real_api_key,
+        )?,
+    })
+}
+
+fn fallback_openclaw_config_mutation_preview(
+    ob_config: &onboard::OnboardConfig,
+) -> OpenclawConfigMutationPreview {
+    let model_key = format!("clawshell/{}", ob_config.model);
+    let base_url = format!(
+        "http://{}:{}/v1",
+        ob_config.server_host, ob_config.server_port
+    );
+    OpenclawConfigMutationPreview {
+        env_after: serde_json::json!({
+            "CLAWSHELL_API_KEY": ob_config.virtual_api_key
+        }),
+        default_models_after: serde_json::json!({
+            model_key: {
+                "alias": "clawshell"
+            }
+        }),
+        providers_after: serde_json::json!({
+            "clawshell": {
+                "baseUrl": base_url,
+                "api": "openai-completions",
+                "apiKey": "${CLAWSHELL_API_KEY}",
+                "models": [
+                    {
+                        "id": ob_config.model,
+                        "name": ob_config.model,
+                    }
+                ]
+            }
+        }),
+        env_removals: Vec::new(),
+    }
+}
+
+fn print_openclaw_config_mutation_preview(
+    preview: &OpenclawConfigMutationPreview,
+) -> Result<(), Box<dyn Error>> {
+    let print_json = |label: &str, value: &serde_json::Value| -> Result<(), Box<dyn Error>> {
+        tui::print_info(label, "");
+        let pretty = serde_json::to_string_pretty(value)?;
+        for line in pretty.lines() {
+            println!("    {line}");
+        }
+        Ok(())
+    };
+
+    print_json("Set env", &preview.env_after)?;
+    print_json("Set agents.defaults.models", &preview.default_models_after)?;
+    print_json("Set models.providers", &preview.providers_after)?;
+    if preview.env_removals.is_empty() {
+        tui::print_info(
+            "Remove from config",
+            "none (no mapped legacy env key in openclaw.json)",
+        );
+    } else {
+        for removal in &preview.env_removals {
+            tui::print_info("Remove from config", removal);
+        }
+    }
+    Ok(())
+}
+
+fn print_openclaw_cleanup_file_preview(preview: &onboard::OpenclawFileRemovalPreview) {
+    tui::print_info("Edit file", &preview.path.display().to_string());
+    for removal in &preview.removals {
+        tui::print_info("Remove", removal);
+    }
+    tui::print_info("Backup", &preview.backup_path.display().to_string());
+}
+
 fn ensure_service_installed_for_lifecycle() -> Result<(), Box<dyn Error>> {
     if platform::service_exists()? {
         return Ok(());
@@ -889,13 +1048,28 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     tui::print_step_done(5, TOTAL_STEPS, "Configuration written");
 
     // Step 6: Write OpenClaw skill files
-    tui::print_step(6, TOTAL_STEPS, "Writing OpenClaw skills...");
-    let openclaw_skill_path = write_onboard_openclaw_skill(&ob_config)?;
-    if let Some(path) = openclaw_skill_path.as_ref() {
-        tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills written");
-        tui::print_info("OpenClaw skill", &path.display().to_string());
+    tui::print_step(6, TOTAL_STEPS, "OpenClaw skill setup...");
+    println!();
+    let openclaw_skill_edit_approved =
+        tui::prompt_confirm("Write OpenClaw skill files for email integration", true)?;
+    let openclaw_skill_path = if openclaw_skill_edit_approved {
+        write_onboard_openclaw_skill(&ob_config)?
     } else {
-        tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills skipped");
+        None
+    };
+    if openclaw_skill_edit_approved {
+        if let Some(path) = openclaw_skill_path.as_ref() {
+            tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills written");
+            tui::print_info("OpenClaw skill", &path.display().to_string());
+        } else {
+            tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills skipped");
+        }
+    } else {
+        tui::print_step_done(
+            6,
+            TOTAL_STEPS,
+            "OpenClaw skills skipped (approval not granted)",
+        );
     }
 
     // OpenClaw config path was already asked in step 4
@@ -916,8 +1090,100 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
 
-    // Step 8: Update OpenClaw configuration via OpenClaw CLI.
-    tui::print_step(8, TOTAL_STEPS, "");
+    // Step 8: Remove legacy provider credentials and update OpenClaw config.
+    tui::print_step(8, TOTAL_STEPS, "OpenClaw update setup...");
+    let openclaw_state_dir = onboard::openclaw_config_root(openclaw_path);
+    println!();
+    let cleanup_preview = onboard::preview_openclaw_provider_credential_cleanup(
+        &openclaw_state_dir,
+        &ob_config.real_api_key,
+    )?;
+    let config_mutation_preview = match build_openclaw_config_mutation_preview(
+        openclaw_path,
+        &ob_config,
+    ) {
+        Ok(preview) => preview,
+        Err(error) => {
+            warn!(
+                error = %error,
+                path = %openclaw_path.display(),
+                "Failed to build exact OpenClaw config mutation preview; showing fallback payload"
+            );
+            fallback_openclaw_config_mutation_preview(&ob_config)
+        }
+    };
+    tui::print_info(
+        "OpenClaw state dir",
+        &openclaw_state_dir.display().to_string(),
+    );
+    tui::print_info("OpenClaw config path", &openclaw_path.display().to_string());
+    tui::print_info(
+        "Mapped-key policy",
+        "Only entries matching the mapped virtual-key target will be removed",
+    );
+    if cleanup_preview.state_dir_exists {
+        if let Some(dot_env) = cleanup_preview.dot_env.as_ref() {
+            print_openclaw_cleanup_file_preview(dot_env);
+        }
+        for auth_profile in &cleanup_preview.auth_profiles {
+            print_openclaw_cleanup_file_preview(auth_profile);
+        }
+        if let Some(oauth) = cleanup_preview.oauth.as_ref() {
+            print_openclaw_cleanup_file_preview(oauth);
+        }
+        if !cleanup_preview.has_changes() {
+            tui::print_info("State-dir edits", "none (no mapped-key match)");
+        }
+    } else {
+        tui::print_warning(&format!(
+            "OpenClaw state dir not found: {}",
+            openclaw_state_dir.display()
+        ));
+    }
+    print_openclaw_config_mutation_preview(&config_mutation_preview)?;
+    let openclaw_edit_approved = tui::prompt_confirm(
+        "Proceed with the exact OpenClaw edits shown above (backups first)",
+        true,
+    )?;
+    if !openclaw_edit_approved {
+        tui::print_step_done(
+            8,
+            TOTAL_STEPS,
+            "OpenClaw update skipped (approval not granted)",
+        );
+        return Err("Onboarding aborted: OpenClaw edit approval was not granted.".into());
+    }
+
+    tui::print_step(8, TOTAL_STEPS, "Applying OpenClaw updates...");
+    // Step status renders inline; break once before interactive OpenClaw approvals.
+    println!();
+    let cleanup = onboard::cleanup_openclaw_provider_credentials(
+        &openclaw_state_dir,
+        &ob_config.real_api_key,
+    )?;
+    if cleanup.has_changes() {
+        tui::print_info("Legacy credential cleanup", "applied");
+        tui::print_info(
+            "Env entries removed",
+            &cleanup.dot_env_entries_removed.to_string(),
+        );
+        tui::print_info(
+            "Auth profiles updated",
+            &cleanup.auth_profile_files_updated.to_string(),
+        );
+        tui::print_info(
+            "Auth profile entries removed",
+            &cleanup.auth_profile_entries_removed.to_string(),
+        );
+        tui::print_info(
+            "OAuth entries removed",
+            &cleanup.oauth_entries_removed.to_string(),
+        );
+        tui::print_info(
+            "Backup files created",
+            &cleanup.backup_files_created.to_string(),
+        );
+    }
     let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
     openclaw_cli::apply_onboard_openclaw_config(&mut openclaw_runner, &ob_config)?;
     if let Some(skill_path) = openclaw_skill_path.as_ref() {

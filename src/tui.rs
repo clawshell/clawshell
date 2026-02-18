@@ -3,8 +3,9 @@ use inquire::PasswordDisplayMode;
 use inquire::ui::{Attributes, Color, RenderConfig, StyleSheet, Styled};
 use inquire::validator::StringValidator;
 use inquire::{Confirm, InquireError, Password, Select, Text};
+use std::error::Error;
 use std::fmt::Display;
-use std::io::Write;
+use std::io::{self, Write};
 
 // Theme color RGB values
 const THEME_R: u8 = 236;
@@ -218,6 +219,47 @@ pub fn prompt_confirm(message: &str, default: bool) -> Result<bool, InquireError
         .prompt()
 }
 
+fn parse_compact_confirm_input(input: &str) -> Option<bool> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub fn prompt_confirm_compact(message: &str, default: bool) -> Result<bool, Box<dyn Error>> {
+    let question_prefix = theme_style().apply_to("?");
+    let answer_prefix = success_style().apply_to("✓");
+    let warning_prefix = warning_style().apply_to("⚠");
+    let suffix = if default { "(Y/n)" } else { "(y/N)" };
+
+    loop {
+        print!("{question_prefix} {message} {suffix} ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim();
+
+        let decision = if trimmed.is_empty() {
+            Some(default)
+        } else {
+            parse_compact_confirm_input(trimmed)
+        };
+
+        if let Some(approved) = decision {
+            let answer = theme_style().apply_to(if approved { "Yes" } else { "No" });
+            // Move up to the prompt row, clear it, then print the finalized answer row.
+            print!("\x1b[1A\r\x1b[2K{answer_prefix} {message} {answer}\n");
+            io::stdout().flush()?;
+            return Ok(approved);
+        }
+
+        println!("{warning_prefix} Enter y/yes or n/no.");
+    }
+}
+
 pub fn prompt_select<T: Display>(message: &str, options: Vec<T>) -> Result<T, InquireError> {
     Select::new(message, options)
         .with_render_config(theme())
@@ -321,5 +363,30 @@ mod tests {
     #[test]
     fn test_print_info_does_not_panic() {
         print_info("Key", "Value");
+    }
+
+    #[test]
+    fn test_parse_compact_confirm_input_yes_variants() {
+        assert_eq!(parse_compact_confirm_input("y"), Some(true));
+        assert_eq!(parse_compact_confirm_input("Y"), Some(true));
+        assert_eq!(parse_compact_confirm_input("yes"), Some(true));
+        assert_eq!(parse_compact_confirm_input("YeS"), Some(true));
+        assert_eq!(parse_compact_confirm_input(" yes "), Some(true));
+    }
+
+    #[test]
+    fn test_parse_compact_confirm_input_no_variants() {
+        assert_eq!(parse_compact_confirm_input("n"), Some(false));
+        assert_eq!(parse_compact_confirm_input("N"), Some(false));
+        assert_eq!(parse_compact_confirm_input("no"), Some(false));
+        assert_eq!(parse_compact_confirm_input("NO"), Some(false));
+        assert_eq!(parse_compact_confirm_input(" no "), Some(false));
+    }
+
+    #[test]
+    fn test_parse_compact_confirm_input_invalid() {
+        assert_eq!(parse_compact_confirm_input(""), None);
+        assert_eq!(parse_compact_confirm_input("maybe"), None);
+        assert_eq!(parse_compact_confirm_input("1"), None);
     }
 }

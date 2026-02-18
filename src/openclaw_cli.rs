@@ -25,6 +25,9 @@ impl OpenclawRunner for RealOpenclawRunner {
     fn run(&mut self, args: &[String]) -> Result<OpenclawCommandOutput, String> {
         let mut command = std::process::Command::new("openclaw");
         command.args(args.iter().map(String::as_str));
+        command.env_remove("OPENAI_API_KEY");
+        command.env_remove("ANTHROPIC_API_KEY");
+        command.env_remove("ANTHROPIC_OAUTH_TOKEN");
         #[cfg(unix)]
         {
             if nix::unistd::geteuid().is_root() {
@@ -340,7 +343,7 @@ fn run_openclaw_raw<R: OpenclawRunner>(
     let display_args = args.join(" ");
     #[cfg(not(test))]
     {
-        let approved = crate::tui::prompt_confirm(
+        let approved = crate::tui::prompt_confirm_compact(
             &format!("Approve running `openclaw {display_args}`?"),
             true,
         )
