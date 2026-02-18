@@ -325,7 +325,8 @@ fn build_openclaw_config_mutation_preview(
         }
     });
     let partial_content = serde_json::to_string(&partial_json)?;
-    let modified_content = onboard::modify_openclaw_config(&partial_content, ob_config)?;
+    let modified_content =
+        onboard::patch_openclaw_config_for_clawshell(&partial_content, ob_config)?;
     let modified_json: serde_json::Value = serde_json::from_str(&modified_content)?;
 
     Ok(OpenclawConfigMutationPreview {

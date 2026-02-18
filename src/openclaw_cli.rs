@@ -108,7 +108,7 @@ pub fn apply_onboard_openclaw_config<R: OpenclawRunner>(
 ) -> Result<(), Box<dyn Error>> {
     let current_json = build_partial_config_for_mutation(runner)?;
     let current_content = serde_json::to_string(&current_json)?;
-    let modified_content = onboard::modify_openclaw_config(&current_content, config)?;
+    let modified_content = onboard::patch_openclaw_config_for_clawshell(&current_content, config)?;
     let modified_json: Value = serde_json::from_str(&modified_content)?;
 
     openclaw_config_set_json(
@@ -143,7 +143,7 @@ pub fn cleanup_openclaw_for_uninstall<R: OpenclawRunner>(
 
     let current_json = build_partial_config_for_cleanup(runner)?;
     let current_content = serde_json::to_string(&current_json)?;
-    let cleaned_content = onboard::remove_openclaw_entries(&current_content)?;
+    let cleaned_content = onboard::remove_clawshell_openclaw_entries(&current_content)?;
     let cleaned_json: Value = serde_json::from_str(&cleaned_content)?;
 
     openclaw_config_unset_path_if_exists(runner, "env.CLAWSHELL_API_KEY")?;
