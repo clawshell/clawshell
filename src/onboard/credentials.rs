@@ -17,6 +17,7 @@ const OPENCLAW_LEGACY_AUTH_PROVIDERS: [&str; 3] = ["openai", "openai-codex", "an
 struct DetectedKeys {
     anthropic: Option<String>,
     openai: Option<String>,
+    openrouter: Option<String>,
 }
 
 impl DetectedKeys {
@@ -24,6 +25,7 @@ impl DetectedKeys {
     fn for_provider(&self, provider: &str) -> Option<&str> {
         match provider {
             "anthropic" => self.anthropic.as_deref(),
+            "openrouter" => self.openrouter.as_deref(),
             "openai" => self.openai.as_deref(),
             _ => None,
         }
@@ -41,7 +43,7 @@ pub(super) fn detect_openclaw_api_key_for_provider(provider: &str) -> Option<Str
 /// Searches these locations in order:
 /// 1. `auth-profiles.json` files inside `<state_dir>/agents/*/agent/`
 /// 2. `.env` file in `<state_dir>`
-/// 3. Environment variables `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
+/// 3. Environment variables `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY`
 fn detect_openclaw_api_keys() -> DetectedKeys {
     detect_openclaw_api_keys_with_home(std::env::var("HOME").ok().as_deref())
 }
@@ -55,11 +57,13 @@ fn detect_openclaw_api_keys_with_home(home: Option<&str>) -> DetectedKeys {
             Err(_) => DetectedKeys {
                 anthropic: std::env::var("ANTHROPIC_API_KEY").ok(),
                 openai: std::env::var("OPENAI_API_KEY").ok(),
+                openrouter: std::env::var("OPENROUTER_API_KEY").ok(),
             },
         },
         None => DetectedKeys {
             anthropic: std::env::var("ANTHROPIC_API_KEY").ok(),
             openai: std::env::var("OPENAI_API_KEY").ok(),
+            openrouter: std::env::var("OPENROUTER_API_KEY").ok(),
         },
     }
 }
@@ -76,6 +80,7 @@ fn detect_openclaw_api_keys_vfs(home: &VfsPath) -> DetectedKeys {
             // Fall back to env vars only
             keys.anthropic = std::env::var("ANTHROPIC_API_KEY").ok();
             keys.openai = std::env::var("OPENAI_API_KEY").ok();
+            keys.openrouter = std::env::var("OPENROUTER_API_KEY").ok();
             return keys;
         }
     };
@@ -84,7 +89,7 @@ fn detect_openclaw_api_keys_vfs(home: &VfsPath) -> DetectedKeys {
     try_auth_profiles_vfs(&state_dir, &mut keys);
 
     // Strategy 2: .env file
-    if keys.anthropic.is_none() || keys.openai.is_none() {
+    if keys.anthropic.is_none() || keys.openai.is_none() || keys.openrouter.is_none() {
         try_dot_env_vfs(&state_dir, &mut keys);
     }
 
@@ -94,6 +99,9 @@ fn detect_openclaw_api_keys_vfs(home: &VfsPath) -> DetectedKeys {
     }
     if keys.openai.is_none() {
         keys.openai = std::env::var("OPENAI_API_KEY").ok();
+    }
+    if keys.openrouter.is_none() {
+        keys.openrouter = std::env::var("OPENROUTER_API_KEY").ok();
     }
 
     keys
@@ -149,8 +157,17 @@ fn try_auth_profiles_vfs(state_dir: &VfsPath, keys: &mut DetectedKeys) {
             {
                 keys.openai = Some(key.to_string());
             }
+            if keys.openrouter.is_none()
+                && let Some(key) = profiles
+                    .get("openrouter:default")
+                    .and_then(|p| p.get("key"))
+                    .and_then(|k| k.as_str())
+                && !key.is_empty()
+            {
+                keys.openrouter = Some(key.to_string());
+            }
         }
-        if keys.anthropic.is_some() && keys.openai.is_some() {
+        if keys.anthropic.is_some() && keys.openai.is_some() && keys.openrouter.is_some() {
             break;
         }
     }
@@ -186,6 +203,8 @@ fn parse_dot_env_content(content: &str, keys: &mut DetectedKeys) {
                 keys.anthropic = Some(v.to_string());
             } else if k == "OPENAI_API_KEY" && keys.openai.is_none() {
                 keys.openai = Some(v.to_string());
+            } else if k == "OPENROUTER_API_KEY" && keys.openrouter.is_none() {
+                keys.openrouter = Some(v.to_string());
             }
         }
     }
@@ -930,7 +949,8 @@ mod tests {
         let profiles = serde_json::json!({
             "profiles": {
                 "anthropic:default": { "key": "sk-ant-detect-123" },
-                "openai:default": { "key": "sk-oai-detect-456" }
+                "openai:default": { "key": "sk-oai-detect-456" },
+                "openrouter:default": { "key": "sk-or-detect-789" }
             }
         });
         vfs_write(
@@ -943,6 +963,7 @@ mod tests {
         let keys = detect_openclaw_api_keys_vfs(&home);
         assert_eq!(keys.anthropic.as_deref(), Some("sk-ant-detect-123"));
         assert_eq!(keys.openai.as_deref(), Some("sk-oai-detect-456"));
+        assert_eq!(keys.openrouter.as_deref(), Some("sk-or-detect-789"));
     }
 
     #[test]
@@ -951,13 +972,14 @@ mod tests {
         vfs_write(
             &root,
             "home/user/.openclaw/.env",
-            "ANTHROPIC_API_KEY=sk-ant-env-789\nOPENAI_API_KEY=sk-oai-env-012\n",
+            "ANTHROPIC_API_KEY=sk-ant-env-789\nOPENAI_API_KEY=sk-oai-env-012\nOPENROUTER_API_KEY=sk-or-env-345\n",
         );
 
         let home = root.join("home/user").unwrap();
         let keys = detect_openclaw_api_keys_vfs(&home);
         assert_eq!(keys.anthropic.as_deref(), Some("sk-ant-env-789"));
         assert_eq!(keys.openai.as_deref(), Some("sk-oai-env-012"));
+        assert_eq!(keys.openrouter.as_deref(), Some("sk-or-env-345"));
     }
 
     #[test]
@@ -1325,7 +1347,7 @@ mod tests {
         vfs_write(
             &root,
             "home/user/.openclaw/.env",
-            "ANTHROPIC_API_KEY=sk-ant-from-env\nOPENAI_API_KEY=sk-oai-from-env\n",
+            "ANTHROPIC_API_KEY=sk-ant-from-env\nOPENAI_API_KEY=sk-oai-from-env\nOPENROUTER_API_KEY=sk-or-from-env\n",
         );
 
         let home = root.join("home/user").unwrap();
@@ -1334,6 +1356,8 @@ mod tests {
         assert_eq!(keys.anthropic.as_deref(), Some("sk-ant-from-profile"));
         // openai falls through to .env
         assert_eq!(keys.openai.as_deref(), Some("sk-oai-from-env"));
+        // openrouter falls through to .env
+        assert_eq!(keys.openrouter.as_deref(), Some("sk-or-from-env"));
     }
 
     #[test]
@@ -1385,9 +1409,11 @@ mod tests {
         let keys = DetectedKeys {
             anthropic: Some("ant-key".to_string()),
             openai: Some("oai-key".to_string()),
+            openrouter: Some("or-key".to_string()),
         };
         assert_eq!(keys.for_provider("anthropic"), Some("ant-key"));
         assert_eq!(keys.for_provider("openai"), Some("oai-key"));
+        assert_eq!(keys.for_provider("openrouter"), Some("or-key"));
         assert_eq!(keys.for_provider("other"), None);
 
         let empty = DetectedKeys::default();

@@ -38,6 +38,10 @@ impl AppState {
         let mut upstream_urls = BTreeMap::new();
         upstream_urls.insert(Provider::Openai, config.upstream_url(Provider::Openai));
         upstream_urls.insert(
+            Provider::Openrouter,
+            config.upstream_url(Provider::Openrouter),
+        );
+        upstream_urls.insert(
             Provider::Anthropic,
             config.upstream_url(Provider::Anthropic),
         );

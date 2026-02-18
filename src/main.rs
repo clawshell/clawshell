@@ -802,6 +802,14 @@ fn cmd_config(config_path: &str, edit: bool) -> Result<(), Box<dyn std::error::E
             tui::print_info("Log level", &config.log_level);
             tui::print_info("Upstream (OpenAI)", &config.upstream.openai_base_url);
             tui::print_info(
+                "Upstream (OpenRouter)",
+                config
+                    .upstream
+                    .openrouter_base_url
+                    .as_deref()
+                    .unwrap_or("https://openrouter.ai/api (default)"),
+            );
+            tui::print_info(
                 "Upstream (Anthropic)",
                 config
                     .upstream
@@ -1539,7 +1547,7 @@ fn cmd_version() {
     println!("{}", tui::theme_bold().apply_to("Features:"));
     let bullet = tui::theme_style().apply_to("▸");
     println!("  {bullet} Virtual key to real key mapping");
-    println!("  {bullet} Multi-provider support (OpenAI, Anthropic)");
+    println!("  {bullet} Multi-provider support (OpenAI, OpenRouter, Anthropic)");
     println!("  {bullet} DLP scanning with block/redact actions");
     println!("  {bullet} Response PII scanning");
     println!("  {bullet} Streaming support (SSE pass-through)");

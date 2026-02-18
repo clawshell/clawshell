@@ -872,6 +872,83 @@ async fn test_openai_still_uses_bearer_auth() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn test_openai_and_openrouter_keys_map_to_distinct_real_keys() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer sk-openai-real"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "provider": "openai"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("authorization", "Bearer sk-openrouter-real"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "provider": "openrouter"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut key_map = BTreeMap::new();
+    key_map.insert(
+        "vk-openai".to_string(),
+        ResolvedKey {
+            real_key: "sk-openai-real".to_string(),
+            provider: Provider::Openai,
+        },
+    );
+    key_map.insert(
+        "vk-openrouter".to_string(),
+        ResolvedKey {
+            real_key: "sk-openrouter-real".to_string(),
+            provider: Provider::Openrouter,
+        },
+    );
+
+    let mut upstream_urls = BTreeMap::new();
+    upstream_urls.insert(Provider::Openai, mock_server.uri());
+    upstream_urls.insert(Provider::Openrouter, mock_server.uri());
+    upstream_urls.insert(Provider::Anthropic, mock_server.uri());
+
+    let app = build_router(AppState {
+        key_manager: Arc::new(KeyManager::new(key_map)),
+        dlp_scanner: Arc::new(DlpScanner::new(&[], false).unwrap()),
+        proxy_client: Arc::new(ProxyClient::with_upstream_urls(
+            upstream_urls,
+            "2023-06-01".to_string(),
+        )),
+        email_enabled: false,
+        email_policy: None,
+        email_accounts: Arc::new(BTreeMap::new()),
+        email_service: Arc::new(EmailService::mock_disabled()),
+    });
+
+    let openai_req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk-openai")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let openai_resp = app.clone().oneshot(openai_req).await.unwrap();
+    assert_eq!(openai_resp.status(), StatusCode::OK);
+
+    let openrouter_req = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header("authorization", "Bearer vk-openrouter")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let openrouter_resp = app.oneshot(openrouter_req).await.unwrap();
+    assert_eq!(openrouter_resp.status(), StatusCode::OK);
+}
+
 // ========== DLP Redaction Tests ==========
 
 fn make_app_with_redact(upstream_url: &str) -> axum::Router {

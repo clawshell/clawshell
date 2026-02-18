@@ -22,6 +22,7 @@ port = {port}
 
 [upstream]
 openai_base_url = "https://api.openai.com"
+openrouter_base_url = "https://openrouter.ai/api"
 anthropic_base_url = "https://api.anthropic.com"
 
 [[keys]]

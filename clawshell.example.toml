@@ -10,11 +10,12 @@ port = 18790
 
 [upstream]
 openai_base_url = "https://api.openai.com"
+openrouter_base_url = "https://openrouter.ai/api"
 anthropic_base_url = "https://api.anthropic.com"
 
 # Virtual-to-real API key mappings
 # Multiple virtual keys can map to the same real key.
-# The "provider" field determines which upstream to use ("openai" or "anthropic").
+# The "provider" field determines which upstream to use ("openai", "openrouter", or "anthropic").
 # Defaults to "openai" if not specified.
 
 [[keys]]

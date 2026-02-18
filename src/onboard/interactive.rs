@@ -323,14 +323,15 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
     tui::print_section("API Configuration");
 
     // Provider selection — if existing, reorder so the existing choice is first
-    let provider_options = if existing.provider.as_deref() == Some("anthropic") {
-        vec!["Anthropic", "OpenAI"]
-    } else {
-        vec!["OpenAI", "Anthropic"]
+    let provider_options = match existing.provider.as_deref() {
+        Some("anthropic") => vec!["Anthropic", "OpenAI", "OpenRouter"],
+        Some("openrouter") => vec!["OpenRouter", "OpenAI", "Anthropic"],
+        _ => vec!["OpenAI", "OpenRouter", "Anthropic"],
     };
     let provider_choice = tui::prompt_select("Select a model provider", provider_options)?;
     let provider = match provider_choice {
         "Anthropic" => "anthropic".to_string(),
+        "OpenRouter" => "openrouter".to_string(),
         _ => "openai".to_string(),
     };
 
@@ -338,10 +339,11 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
     let default_model = existing
         .model
         .as_deref()
-        .unwrap_or(if provider == "anthropic" {
-            "claude-sonnet-4-5-20250929"
-        } else {
-            "gpt-5.2-chat-latest"
+        .unwrap_or(match provider.as_str() {
+            "anthropic" => "claude-sonnet-4-5-20250929",
+            "openai" => "gpt-5.2-chat-latest",
+            "openrouter" => "openrouter/auto",
+            _ => unreachable!(),
         });
     let model = tui::prompt_text("Enter the model name", Some(default_model))?;
 

@@ -8,6 +8,7 @@ use std::path::Path;
 pub enum Provider {
     #[default]
     Openai,
+    Openrouter,
     Anthropic,
 }
 
@@ -15,6 +16,7 @@ impl Provider {
     pub fn default_base_url(&self) -> &'static str {
         match self {
             Provider::Openai => "https://api.openai.com",
+            Provider::Openrouter => "https://openrouter.ai/api",
             Provider::Anthropic => "https://api.anthropic.com",
         }
     }
@@ -63,6 +65,8 @@ fn default_port() -> u16 {
 pub struct UpstreamConfig {
     #[serde(default = "default_openai_base_url")]
     pub openai_base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openrouter_base_url: Option<String>,
     #[serde(default)]
     pub anthropic_base_url: Option<String>,
     #[serde(default = "default_anthropic_version")]
@@ -321,6 +325,11 @@ impl Config {
     pub fn upstream_url(&self, provider: Provider) -> String {
         match provider {
             Provider::Openai => self.upstream.openai_base_url.clone(),
+            Provider::Openrouter => self
+                .upstream
+                .openrouter_base_url
+                .clone()
+                .unwrap_or_else(|| Provider::Openrouter.default_base_url().to_string()),
             Provider::Anthropic => self
                 .upstream
                 .anthropic_base_url
