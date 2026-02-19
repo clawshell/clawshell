@@ -37,6 +37,8 @@ Fetch Email message metadata and individual message content through the Email en
 
 1. First, retrieve `email_virtual_key` from memory/context.
 2. If not available, ask the user for the Email virtual key.
+3. Ask whether they want you to remember this virtual key.
+4. If yes, store `email_virtual_key` in memory/context; if no, use it only for the current request.
 
 ```bash
 curl -sS \
@@ -89,6 +91,9 @@ Load `references/api-usage.md` for detailed examples and status-code behavior.
 
 1. Retrieve `email_virtual_key` from memory/context first.
 2. Ask the user for it only if memory/context does not contain it.
+3. Ask whether the user wants you to remember this virtual key.
+4. Store `email_virtual_key` in memory/context only with explicit user consent; otherwise,
+   use it only for the current request.
 
 ## Examples
 
@@ -189,6 +194,9 @@ mod tests {
         assert!(skill_md.contains("Bearer <email_virtual_key>"));
         assert!(skill_md.contains("First, retrieve `email_virtual_key` from memory/context."));
         assert!(skill_md.contains("If not available, ask the user for the Email virtual key."));
+        assert!(skill_md.contains("Ask whether they want you to remember this virtual key."));
+        assert!(skill_md
+            .contains("If yes, store `email_virtual_key` in memory/context; if no, use it only for the current request."));
         assert!(skill_md.contains("/v1/email/messages/42"));
         assert!(skill_md.contains("html_body"));
         assert!(!skill_md.contains("vk-email-001"));
@@ -207,6 +215,12 @@ mod tests {
         assert!(reference_md.contains("text_body"));
         assert!(reference_md.contains("Bearer <email_virtual_key>"));
         assert!(reference_md.contains("Retrieve `email_virtual_key` from memory/context first."));
+        assert!(
+            reference_md.contains("Ask whether the user wants you to remember this virtual key.")
+        );
+        assert!(reference_md.contains(
+            "Store `email_virtual_key` in memory/context only with explicit user consent;"
+        ));
         assert!(!reference_md.contains("vk-email-001"));
     }
 }
