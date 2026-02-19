@@ -118,9 +118,15 @@ fn try_read_openclaw_config_path(clawshell_config_file: &Path) -> Option<PathBuf
         .map(PathBuf::from)
 }
 
+#[derive(Debug, Clone)]
+struct WrittenOpenclawSkill {
+    path: PathBuf,
+    manifest_entry: onboard::ManagedSkillManifestEntry,
+}
+
 fn write_onboard_openclaw_skill(
     ob_config: &crate::onboard::OnboardConfig,
-) -> Result<Option<PathBuf>, Box<dyn Error>> {
+) -> Result<Option<WrittenOpenclawSkill>, Box<dyn Error>> {
     let Some(skill) = onboard::render_openclaw_email_messages_skill(ob_config) else {
         return Ok(None);
     };
@@ -129,13 +135,19 @@ fn write_onboard_openclaw_skill(
     let skill_dir = openclaw_root.join("skills").join(skill.name);
     std::fs::create_dir_all(&skill_dir)?;
 
+    let mut managed_files: Vec<(String, String)> = Vec::new();
     for file in skill.files {
         let path = skill_dir.join(file.relative_path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, file.content)?;
+        std::fs::write(path, &file.content)?;
+        managed_files.push((file.relative_path.to_string(), file.content));
     }
+
+    let metadata = onboard::build_managed_skill_metadata(skill.name, &managed_files);
+    onboard::write_managed_skill_metadata(&skill_dir, &metadata)?;
+    let manifest_entry = onboard::build_managed_skill_manifest_entry(&skill_dir, &metadata);
 
     if !align_owner_with_openclaw_path(&skill_dir, &ob_config.openclaw_config_path)? {
         warn!(
@@ -145,7 +157,10 @@ fn write_onboard_openclaw_skill(
         );
     }
 
-    Ok(Some(skill_dir))
+    Ok(Some(WrittenOpenclawSkill {
+        path: skill_dir,
+        manifest_entry,
+    }))
 }
 
 fn resolve_openclaw_owner_spec(openclaw_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
@@ -1061,15 +1076,16 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     let openclaw_skill_edit_approved =
         tui::prompt_confirm("Write OpenClaw skill files for email integration", true)?;
-    let openclaw_skill_path = if openclaw_skill_edit_approved {
+    let openclaw_skill = if openclaw_skill_edit_approved {
         write_onboard_openclaw_skill(&ob_config)?
     } else {
         None
     };
     if openclaw_skill_edit_approved {
-        if let Some(path) = openclaw_skill_path.as_ref() {
+        if let Some(skill) = openclaw_skill.as_ref() {
+            onboard::upsert_managed_skill_manifest_entry(&config_file, &skill.manifest_entry)?;
             tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills written");
-            tui::print_info("OpenClaw skill", &path.display().to_string());
+            tui::print_info("OpenClaw skill", &skill.path.display().to_string());
         } else {
             tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills skipped");
         }
@@ -1195,8 +1211,8 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
     openclaw_cli::apply_onboard_openclaw_config(&mut openclaw_runner, &ob_config)?;
-    if let Some(skill_path) = openclaw_skill_path.as_ref() {
-        align_owner_with_openclaw_path(skill_path, openclaw_path)?;
+    if let Some(skill) = openclaw_skill.as_ref() {
+        align_owner_with_openclaw_path(&skill.path, openclaw_path)?;
     }
     tui::print_step_done(8, TOTAL_STEPS, "OpenClaw config updated");
 
@@ -1410,6 +1426,23 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
             .join("skills")
             .join(onboard::OPENCLAW_EMAIL_MESSAGES_SKILL_NAME)
     });
+    let openclaw_skill_manifest = if clawshell_config_file.exists() {
+        onboard::read_managed_skill_manifest_entry(
+            &clawshell_config_file,
+            onboard::OPENCLAW_EMAIL_MESSAGES_SKILL_NAME,
+        )
+    } else {
+        None
+    };
+    let openclaw_skill_inspection = if let Some(skill_dir) = openclaw_skill_dir.as_ref() {
+        onboard::inspect_managed_skill_for_uninstall(
+            skill_dir,
+            onboard::OPENCLAW_EMAIL_MESSAGES_SKILL_NAME,
+            openclaw_skill_manifest.as_ref(),
+        )
+    } else {
+        onboard::ManagedSkillInspection::missing()
+    };
 
     tui::print_warning("This will remove the following:");
     tui::print_info("ClawShell", "Stop if running");
@@ -1421,7 +1454,35 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(skill_dir) = openclaw_skill_dir.as_ref()
         && skill_dir.exists()
     {
-        tui::print_info("OpenClaw skill", &skill_dir.display().to_string());
+        match openclaw_skill_inspection.state {
+            onboard::ManagedSkillUninstallState::ManagedUnchanged => {
+                tui::print_info(
+                    "OpenClaw skill",
+                    &format!("{} (managed)", skill_dir.display()),
+                );
+            }
+            onboard::ManagedSkillUninstallState::ManagedModified => {
+                tui::print_info(
+                    "OpenClaw skill",
+                    &format!("{} (managed, modified)", skill_dir.display()),
+                );
+                tui::print_warning(&format!(
+                    "Managed OpenClaw skill has local modifications: {}",
+                    openclaw_skill_inspection.detail
+                ));
+            }
+            onboard::ManagedSkillUninstallState::Unmanaged => {
+                tui::print_info(
+                    "OpenClaw skill",
+                    &format!("{} (legacy/unverified)", skill_dir.display()),
+                );
+                tui::print_warning(&format!(
+                    "Skill ownership is not verified: {}",
+                    openclaw_skill_inspection.detail
+                ));
+            }
+            onboard::ManagedSkillUninstallState::Missing => {}
+        }
     }
     tui::print_info("Binary", &format!("{} (preserved)", exe_path.display()));
     tui::print_info("System user", "clawshell");
@@ -1463,28 +1524,78 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(skill_dir) = openclaw_skill_dir.as_ref()
         && skill_dir.exists()
     {
-        let remove_skill = if skip_confirm {
-            true
-        } else {
-            let prompt = format!("Remove OpenClaw skill at {}?", skill_dir.display());
-            tui::prompt_confirm(&prompt, true)?
+        let remove_skill_dir = |path: &Path| match std::fs::remove_dir_all(path) {
+            Ok(()) => tui::print_success(&format!("OpenClaw skill removed: {}", path.display())),
+            Err(error) => tui::print_warning(&format!(
+                "Failed to remove OpenClaw skill at {}: {error}",
+                path.display()
+            )),
         };
 
-        if remove_skill {
-            match std::fs::remove_dir_all(skill_dir) {
-                Ok(()) => {
-                    tui::print_success(&format!("OpenClaw skill removed: {}", skill_dir.display()))
+        match openclaw_skill_inspection.state {
+            onboard::ManagedSkillUninstallState::ManagedUnchanged => {
+                let remove_skill = if skip_confirm {
+                    true
+                } else {
+                    let prompt =
+                        format!("Remove managed OpenClaw skill at {}?", skill_dir.display());
+                    tui::prompt_confirm(&prompt, true)?
+                };
+
+                if remove_skill {
+                    remove_skill_dir(skill_dir);
+                } else {
+                    tui::print_info(
+                        "Skipped",
+                        &format!("OpenClaw skill preserved at {}", skill_dir.display()),
+                    );
                 }
-                Err(error) => tui::print_warning(&format!(
-                    "Failed to remove OpenClaw skill at {}: {error}",
-                    skill_dir.display()
-                )),
             }
-        } else {
-            tui::print_info(
-                "Skipped",
-                &format!("OpenClaw skill preserved at {}", skill_dir.display()),
-            );
+            onboard::ManagedSkillUninstallState::ManagedModified => {
+                if skip_confirm {
+                    tui::print_warning(&format!(
+                        "Preserving managed-but-modified OpenClaw skill at {} (--yes does not force-delete modified skills).",
+                        skill_dir.display()
+                    ));
+                } else {
+                    let prompt = format!(
+                        "Managed OpenClaw skill at {} was modified. Delete anyway?",
+                        skill_dir.display()
+                    );
+                    let remove_skill = tui::prompt_confirm(&prompt, false)?;
+                    if remove_skill {
+                        remove_skill_dir(skill_dir);
+                    } else {
+                        tui::print_info(
+                            "Skipped",
+                            &format!("OpenClaw skill preserved at {}", skill_dir.display()),
+                        );
+                    }
+                }
+            }
+            onboard::ManagedSkillUninstallState::Unmanaged => {
+                if skip_confirm {
+                    tui::print_warning(&format!(
+                        "Preserving unverified OpenClaw skill at {} (--yes does not force-delete unverified skills).",
+                        skill_dir.display()
+                    ));
+                } else {
+                    let prompt = format!(
+                        "No ClawShell ownership marker/manifest match at {}. Delete anyway? (high risk)",
+                        skill_dir.display()
+                    );
+                    let remove_skill = tui::prompt_confirm(&prompt, false)?;
+                    if remove_skill {
+                        remove_skill_dir(skill_dir);
+                    } else {
+                        tui::print_info(
+                            "Skipped",
+                            &format!("OpenClaw skill preserved at {}", skill_dir.display()),
+                        );
+                    }
+                }
+            }
+            onboard::ManagedSkillUninstallState::Missing => {}
         }
     }
 

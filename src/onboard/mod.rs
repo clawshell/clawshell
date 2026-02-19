@@ -3,6 +3,7 @@ mod backup;
 mod config_render;
 mod credentials;
 mod interactive;
+mod managed_skills;
 mod openclaw_json;
 mod skills;
 mod types;
@@ -20,6 +21,12 @@ pub use credentials::{
     cleanup_openclaw_provider_credentials, preview_openclaw_provider_credential_cleanup,
 };
 pub use interactive::collect_onboard_config_tui;
+pub use managed_skills::{
+    ManagedSkillInspection, ManagedSkillManifestEntry, ManagedSkillUninstallState,
+    build_managed_skill_manifest_entry, build_managed_skill_metadata,
+    inspect_managed_skill_for_uninstall, read_managed_skill_manifest_entry,
+    upsert_managed_skill_manifest_entry, write_managed_skill_metadata,
+};
 pub use openclaw_json::{patch_openclaw_config_for_clawshell, remove_clawshell_openclaw_entries};
 pub use skills::render_openclaw_email_messages_skill;
 pub use types::{OPENCLAW_EMAIL_MESSAGES_SKILL_NAME, OnboardConfig, OpenclawFileRemovalPreview};
