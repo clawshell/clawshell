@@ -213,6 +213,24 @@ base_url = "https://api.openai.com"
     }
 
     #[test]
+    fn test_detect_version_from_content_prerelease() {
+        let content = r#"
+version = "0.1.0-alpha.0"
+log_level = "info"
+
+[server]
+host = "127.0.0.1"
+port = 18790
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+"#;
+
+        let version = detect_version_from_content(content).unwrap().unwrap();
+        assert_eq!(version.to_string(), "0.1.0-alpha.0");
+    }
+
+    #[test]
     fn test_version_gate_status_missing() {
         let content = r#"
 log_level = "info"
@@ -227,6 +245,28 @@ base_url = "https://api.openai.com"
 
         let status = version_gate_status_from_content(content).unwrap();
         assert_eq!(status, VersionGateStatus::Missing);
+    }
+
+    #[test]
+    fn test_version_gate_status_current() {
+        let current = env!("CARGO_PKG_VERSION");
+        let content = format!(
+            r#"
+version = "{current}"
+log_level = "info"
+
+[server]
+host = "127.0.0.1"
+port = 18790
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+"#,
+        );
+
+        let status = version_gate_status_from_content(&content).unwrap();
+        let expected = ConfigVersion::current();
+        assert_eq!(status, VersionGateStatus::Current(expected));
     }
 
     #[test]

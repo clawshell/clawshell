@@ -1,5 +1,5 @@
 # ClawShell Configuration
-version = "0.0.2"
+version = "0.1.0-alpha.0"
 
 # Log level: trace, debug, info, warn, error
 log_level = "info"

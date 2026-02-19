@@ -185,7 +185,7 @@ sudo clawshell config --edit   # open in $EDITOR
 A minimal config looks like this:
 
 ```toml
-version = "0.0.2"
+version = "0.1.0-alpha.0"
 log_level = "info"
 
 [server]

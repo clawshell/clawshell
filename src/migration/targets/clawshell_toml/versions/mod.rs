@@ -1,4 +1,4 @@
-mod v0_0_1_to_v0_0_2;
+mod to_v0_1_0_alpha_0;
 
 use crate::migration::core::{AmbiguityResolver, ConfigVersion};
 use crate::migration::target::TargetError;
@@ -24,10 +24,12 @@ pub fn apply_versioned_steps(
     resolver: &mut dyn AmbiguityResolver,
 ) -> Result<VersionStepOutput, TargetError> {
     let mut output = VersionStepOutput::default();
-    let v0_0_2: ConfigVersion = "0.0.2".parse().expect("literal config version must parse");
+    let v0_1_0_alpha_0: ConfigVersion = "0.1.0-alpha.0"
+        .parse()
+        .expect("literal config version must parse");
 
-    if from < &v0_0_2 && to >= &v0_0_2 {
-        let step_output = v0_0_1_to_v0_0_2::apply(target_name, table, resolver)?;
+    if from < &v0_1_0_alpha_0 && to >= &v0_1_0_alpha_0 {
+        let step_output = to_v0_1_0_alpha_0::apply(target_name, table, resolver)?;
         output.merge(step_output);
     }
 
@@ -52,7 +54,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_versioned_steps_applies_0_0_1_to_0_0_2() {
+    fn test_apply_versioned_steps_applies_on_crossing_to_0_1_0_alpha_0() {
         let mut table: toml::value::Table = toml::from_str(
             r#"
 version = "0.0.1"
@@ -64,7 +66,7 @@ base_url = "https://api.openai.com"
         .unwrap();
 
         let from: ConfigVersion = "0.0.1".parse().unwrap();
-        let to: ConfigVersion = "0.0.2".parse().unwrap();
+        let to: ConfigVersion = "0.1.0-alpha.0".parse().unwrap();
 
         let mut resolver = NoopResolver;
         let output = apply_versioned_steps("clawshell", &mut table, &from, &to, &mut resolver)
@@ -85,7 +87,7 @@ base_url = "https://api.openai.com"
     fn test_apply_versioned_steps_noop_when_already_current() {
         let mut table: toml::value::Table = toml::from_str(
             r#"
-version = "0.0.2"
+version = "0.1.0-alpha.0"
 
 [upstream]
 openai_base_url = "https://api.openai.com"
@@ -93,8 +95,8 @@ openai_base_url = "https://api.openai.com"
         )
         .unwrap();
 
-        let from: ConfigVersion = "0.0.2".parse().unwrap();
-        let to: ConfigVersion = "0.0.2".parse().unwrap();
+        let from: ConfigVersion = "0.1.0-alpha.0".parse().unwrap();
+        let to: ConfigVersion = "0.1.0-alpha.0".parse().unwrap();
 
         let mut resolver = NoopResolver;
         let output = apply_versioned_steps("clawshell", &mut table, &from, &to, &mut resolver)

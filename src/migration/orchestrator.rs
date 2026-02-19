@@ -81,6 +81,7 @@ pub enum MigrationOrchestratorError {
     },
 }
 
+#[expect(clippy::result_large_err)]
 pub fn migrate_targets(
     targets: &[Box<dyn MigrationTarget>],
     resolver: &mut dyn AmbiguityResolver,

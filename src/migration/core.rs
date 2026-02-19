@@ -1,16 +1,13 @@
 use std::fmt;
 use std::str::FromStr;
 
+use semver::Version;
 use thiserror::Error;
 
 pub const LEGACY_BASELINE_VERSION: &str = "0.0.1";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ConfigVersion {
-    major: u64,
-    minor: u64,
-    patch: u64,
-}
+pub struct ConfigVersion(Version);
 
 impl ConfigVersion {
     pub fn current() -> Self {
@@ -29,12 +26,14 @@ impl ConfigVersion {
 
 impl fmt::Display for ConfigVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+        write!(f, "{}", self.0)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("invalid semantic version '{raw}' (expected MAJOR.MINOR.PATCH)")]
+#[error(
+    "invalid semantic version '{raw}' (expected SemVer: MAJOR.MINOR.PATCH with optional -PRERELEASE)"
+)]
 pub struct ConfigVersionParseError {
     raw: String,
 }
@@ -44,47 +43,11 @@ impl FromStr for ConfigVersion {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let raw = value.trim();
-        let mut parts = raw.split('.');
-
-        let major = parts
-            .next()
-            .ok_or_else(|| ConfigVersionParseError {
-                raw: raw.to_string(),
-            })?
-            .parse::<u64>()
+        Version::parse(raw)
+            .map(Self)
             .map_err(|_| ConfigVersionParseError {
                 raw: raw.to_string(),
-            })?;
-        let minor = parts
-            .next()
-            .ok_or_else(|| ConfigVersionParseError {
-                raw: raw.to_string(),
-            })?
-            .parse::<u64>()
-            .map_err(|_| ConfigVersionParseError {
-                raw: raw.to_string(),
-            })?;
-        let patch = parts
-            .next()
-            .ok_or_else(|| ConfigVersionParseError {
-                raw: raw.to_string(),
-            })?
-            .parse::<u64>()
-            .map_err(|_| ConfigVersionParseError {
-                raw: raw.to_string(),
-            })?;
-
-        if parts.next().is_some() {
-            return Err(ConfigVersionParseError {
-                raw: raw.to_string(),
-            });
-        }
-
-        Ok(Self {
-            major,
-            minor,
-            patch,
-        })
+            })
     }
 }
 
@@ -137,17 +100,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_config_version_valid_prerelease() {
+        let version: ConfigVersion = "0.1.0-alpha.0".parse().unwrap();
+        assert_eq!(version.to_string(), "0.1.0-alpha.0");
+    }
+
+    #[test]
     fn test_parse_config_version_invalid() {
         assert!("1.2".parse::<ConfigVersion>().is_err());
         assert!("1.2.3.4".parse::<ConfigVersion>().is_err());
         assert!("1.2.alpha".parse::<ConfigVersion>().is_err());
         assert!("alpha".parse::<ConfigVersion>().is_err());
+        assert!("0.1.0.alpha.0".parse::<ConfigVersion>().is_err());
     }
 
     #[test]
     fn test_version_ordering() {
         let v1: ConfigVersion = "0.0.1".parse().unwrap();
-        let v2: ConfigVersion = "0.1.0".parse().unwrap();
+        let v2: ConfigVersion = "0.1.0-alpha.0".parse().unwrap();
+        let v3: ConfigVersion = "0.1.0-alpha.1".parse().unwrap();
+        let v4: ConfigVersion = "0.1.0".parse().unwrap();
         assert!(v1 < v2);
+        assert!(v2 < v3);
+        assert!(v3 < v4);
     }
 }

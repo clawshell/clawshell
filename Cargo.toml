@@ -1,6 +1,6 @@
 [package]
 name = "clawshell"
-version = "0.0.2"
+version = "0.1.0-alpha.0"
 edition = "2024"
 license-file = "LICENSE"
 homepage = "https://github.com/clawshell/clawshell"
@@ -30,6 +30,7 @@ inquire = "0.9.3"
 console = "0.16.2"
 vfs = "0.12"
 thiserror = "2"
+semver = "1"
 rustls-native-certs = "0.8.3"
 sha2 = "0.10.9"
 uuid = { version = "1.18.1", features = ["v4"] }
