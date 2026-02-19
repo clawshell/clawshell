@@ -1,6 +1,6 @@
 {
   "name": "@clawshell/clawshell",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0",
   "description": "The essential safety harness for OpenClaw's PII & API data",
   "license": "Apache-2.0",
   "repository": {
@@ -12,9 +12,9 @@
     "clawshell": "bin/clawshell.js"
   },
   "optionalDependencies": {
-    "@clawshell/clawshell-darwin-arm64": "0.1.0-alpha.1",
-    "@clawshell/clawshell-linux-arm64": "0.1.0-alpha.1",
-    "@clawshell/clawshell-linux-x64": "0.1.0-alpha.1"
+    "@clawshell/clawshell-darwin-arm64": "0.1.0",
+    "@clawshell/clawshell-linux-arm64": "0.1.0",
+    "@clawshell/clawshell-linux-x64": "0.1.0"
   },
   "engines": {
     "node": ">=16"
