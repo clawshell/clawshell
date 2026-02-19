@@ -1094,28 +1094,38 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     // Step 6: Write OpenClaw skill files
     tui::print_step(6, TOTAL_STEPS, "OpenClaw skill setup...");
     println!();
-    let openclaw_skill_edit_approved =
-        tui::prompt_confirm("Write OpenClaw skill files for email integration", true)?;
-    let openclaw_skill = if openclaw_skill_edit_approved {
-        write_onboard_openclaw_skill(&ob_config)?
-    } else {
-        None
-    };
-    if openclaw_skill_edit_approved {
-        if let Some(skill) = openclaw_skill.as_ref() {
-            onboard::upsert_managed_skill_manifest_entry(&config_file, &skill.manifest_entry)?;
-            tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills written");
-            tui::print_info("OpenClaw skill", &skill.path.display().to_string());
+    let openclaw_skill = if onboard::should_setup_openclaw_email_skill(&ob_config) {
+        let openclaw_skill_edit_approved =
+            tui::prompt_confirm("Write OpenClaw skill files for email integration", true)?;
+        let openclaw_skill = if openclaw_skill_edit_approved {
+            write_onboard_openclaw_skill(&ob_config)?
         } else {
-            tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills skipped");
+            None
+        };
+        if openclaw_skill_edit_approved {
+            if let Some(skill) = openclaw_skill.as_ref() {
+                onboard::upsert_managed_skill_manifest_entry(&config_file, &skill.manifest_entry)?;
+                tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills written");
+                tui::print_info("OpenClaw skill", &skill.path.display().to_string());
+            } else {
+                tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills skipped");
+            }
+        } else {
+            tui::print_step_done(
+                6,
+                TOTAL_STEPS,
+                "OpenClaw skills skipped (approval not granted)",
+            );
         }
+        openclaw_skill
     } else {
         tui::print_step_done(
             6,
             TOTAL_STEPS,
-            "OpenClaw skills skipped (approval not granted)",
+            "OpenClaw skills skipped (email integration not configured)",
         );
-    }
+        None
+    };
 
     // OpenClaw config path was already asked in step 4
     let openclaw_path = &ob_config.openclaw_config_path;

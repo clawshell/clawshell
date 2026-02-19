@@ -11,6 +11,10 @@ fn format_clawshell_base_url(host: &str, port: u16) -> String {
     }
 }
 
+pub fn should_setup_openclaw_email_skill(config: &OnboardConfig) -> bool {
+    config.email.is_some()
+}
+
 pub fn render_openclaw_email_messages_skill(config: &OnboardConfig) -> Option<OnboardSkillBundle> {
     config.email.as_ref()?;
     let base_url = format_clawshell_base_url(&config.server_host, config.server_port);
@@ -159,6 +163,28 @@ mod tests {
     use super::*;
     use crate::onboard::test_support::test_config;
     use crate::onboard::types::{OnboardEmailConfig, OnboardEmailMode};
+
+    #[test]
+    fn test_should_setup_openclaw_email_skill_returns_false_without_email() {
+        let config = test_config();
+        assert!(!should_setup_openclaw_email_skill(&config));
+    }
+
+    #[test]
+    fn test_should_setup_openclaw_email_skill_returns_true_with_email() {
+        let mut config = test_config();
+        config.email = Some(OnboardEmailConfig {
+            mode: OnboardEmailMode::Allowlist,
+            sender_rules: vec!["@trusted.local".to_string()],
+            account_virtual_key: "vk-email-001".to_string(),
+            email: "bot@gmail.com".to_string(),
+            app_password: "abcd efgh ijkl mnop".to_string(),
+            imap_host: "imap.gmail.com".to_string(),
+            imap_port: 993,
+        });
+
+        assert!(should_setup_openclaw_email_skill(&config));
+    }
 
     #[test]
     fn test_render_openclaw_email_messages_skill_returns_none_without_email() {

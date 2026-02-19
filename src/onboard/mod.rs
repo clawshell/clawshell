@@ -28,5 +28,5 @@ pub use managed_skills::{
     upsert_managed_skill_manifest_entry, write_managed_skill_metadata,
 };
 pub use openclaw_json::{patch_openclaw_config_for_clawshell, remove_clawshell_openclaw_entries};
-pub use skills::render_openclaw_email_messages_skill;
+pub use skills::{render_openclaw_email_messages_skill, should_setup_openclaw_email_skill};
 pub use types::{OPENCLAW_EMAIL_MESSAGES_SKILL_NAME, OnboardConfig, OpenclawFileRemovalPreview};
