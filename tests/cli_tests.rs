@@ -84,6 +84,7 @@ fn test_help_output() {
         .stdout(contains("logs"))
         .stdout(contains("config"))
         .stdout(contains("migrate-config"))
+        .stdout(contains("clawshell migrate-config"))
         .stdout(contains("onboard"))
         .stdout(contains("version"));
 }
@@ -183,6 +184,20 @@ fn test_migrate_config_writes_version_and_backup() {
     let backup = PathBuf::from(format!("{}.bak", temp.path().display()));
     let _ = std::fs::remove_file(&backup);
 
+    if !nix::unistd::getuid().is_root() {
+        cmd()
+            .args([
+                "migrate-config",
+                "--config",
+                &temp.path().display().to_string(),
+            ])
+            .assert()
+            .failure()
+            .stdout(contains("Administrative Privileges Required"))
+            .stdout(contains("sudo clawshell migrate-config"));
+        return;
+    }
+
     cmd()
         .args([
             "migrate-config",
@@ -214,7 +229,7 @@ fn test_start_fails_if_migration_not_performed() {
         ])
         .assert()
         .failure()
-        .stderr(contains("migrate-config"));
+        .stderr(contains("sudo clawshell migrate-config"));
 }
 
 #[test]
@@ -231,7 +246,7 @@ fn test_config_edit_fails_if_migration_not_performed() {
         ])
         .assert()
         .failure()
-        .stderr(contains("migrate-config"));
+        .stderr(contains("sudo clawshell migrate-config"));
 }
 
 /// Combined log tests to avoid race conditions on the shared log file.

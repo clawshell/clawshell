@@ -85,7 +85,7 @@ impl AmbiguityResolver for FailOnAmbiguousResolver {
 fn ensure_config_migrated(path: &std::path::Path) -> Result<(), Box<dyn Error>> {
     clawshell_toml::ensure_current_version(path).map_err(|e| {
         format!(
-            "{}. Run 'clawshell migrate-config --config {}' to migrate to the current schema.",
+            "{}. Run 'sudo clawshell migrate-config --config {}' to migrate to the current schema.",
             e,
             path.display()
         )
@@ -469,7 +469,10 @@ fn print_migration_status(path: &str, status: &VersionGateStatus) {
         }
         VersionGateStatus::Missing => {
             tui::print_warning("Schema version: missing (migration required)");
-            tui::print_info("Run", &format!("clawshell migrate-config --config {path}"));
+            tui::print_info(
+                "Run",
+                &format!("sudo clawshell migrate-config --config {path}"),
+            );
         }
         VersionGateStatus::Mismatch { found } => {
             tui::print_warning(&format!(
@@ -477,7 +480,10 @@ fn print_migration_status(path: &str, status: &VersionGateStatus) {
                 found,
                 crate::migration::core::ConfigVersion::current()
             ));
-            tui::print_info("Run", &format!("clawshell migrate-config --config {path}"));
+            tui::print_info(
+                "Run",
+                &format!("sudo clawshell migrate-config --config {path}"),
+            );
         }
     }
 }
@@ -883,6 +889,20 @@ fn cmd_migrate_config(
     on_ambiguous: Option<OnAmbiguousOption>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tui::print_banner("Migrate Config");
+
+    if !nix::unistd::getuid().is_root() {
+        tui::print_callout(
+            "Administrative Privileges Required",
+            &[
+                "Configuration migration updates protected files under /etc/clawshell.",
+                "",
+                "Please re-run with sudo:",
+                "",
+                &format!("  $ sudo clawshell migrate-config --config {config_path}"),
+            ],
+        );
+        std::process::exit(1);
+    }
 
     let path = PathBuf::from(config_path);
     if !path.exists() {
