@@ -1240,6 +1240,10 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
+    tui::print_info(
+        "OpenClaw workaround",
+        "Temporarily setting `gateway.reload.mode` to `off` during config updates, then restoring `hybrid`.",
+    );
     openclaw_cli::apply_onboard_openclaw_config(&mut openclaw_runner, &ob_config)?;
     if let Some(skill) = openclaw_skill.as_ref() {
         align_owner_with_openclaw_path(&skill.path, openclaw_path)?;
@@ -1534,6 +1538,10 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     {
         tui::print_info("Action", "Cleaning up OpenClaw configuration...");
         let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
+        tui::print_info(
+            "OpenClaw workaround",
+            "Temporarily setting `gateway.reload.mode` to `off` during uninstall cleanup, then restoring `hybrid`.",
+        );
         match openclaw_cli::cleanup_openclaw_for_uninstall(&mut openclaw_runner)? {
             openclaw_cli::UninstallCleanupOutcome::BlockedByDefaultModel => {
                 tui::print_error(

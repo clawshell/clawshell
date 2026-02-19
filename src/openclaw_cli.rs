@@ -3,6 +3,10 @@ use std::error::Error;
 
 use crate::onboard;
 
+#[cfg(not(test))]
+const OPENCLAW_GATEWAY_RELOAD_WORKAROUND_ISSUE_URL: &str =
+    "https://github.com/openclaw/openclaw/issues/14161";
+
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -225,27 +229,34 @@ pub fn apply_onboard_openclaw_config<R: OpenclawRunner>(
     runner: &mut R,
     config: &onboard::OnboardConfig,
 ) -> Result<(), Box<dyn Error>> {
-    let current_json = build_partial_config_for_mutation(runner)?;
-    let current_content = serde_json::to_string(&current_json)?;
-    let modified_content = onboard::patch_openclaw_config_for_clawshell(&current_content, config)?;
-    let modified_json: Value = serde_json::from_str(&modified_content)?;
+    with_gateway_reload_mode_disabled(
+        runner,
+        "apply onboarding OpenClaw configuration changes",
+        |runner| {
+            let current_json = build_partial_config_for_mutation(runner)?;
+            let current_content = serde_json::to_string(&current_json)?;
+            let modified_content =
+                onboard::patch_openclaw_config_for_clawshell(&current_content, config)?;
+            let modified_json: Value = serde_json::from_str(&modified_content)?;
 
-    openclaw_config_set_json(
-        runner,
-        "env",
-        &nested_value_or_empty_object(&modified_json, &["env"]),
-    )?;
-    openclaw_config_set_json(
-        runner,
-        "agents.defaults.models",
-        &nested_value_or_empty_object(&modified_json, &["agents", "defaults", "models"]),
-    )?;
-    openclaw_config_set_json(
-        runner,
-        "models.providers",
-        &nested_value_or_empty_object(&modified_json, &["models", "providers"]),
-    )?;
-    Ok(())
+            openclaw_config_set_json(
+                runner,
+                "env",
+                &nested_value_or_empty_object(&modified_json, &["env"]),
+            )?;
+            openclaw_config_set_json(
+                runner,
+                "agents.defaults.models",
+                &nested_value_or_empty_object(&modified_json, &["agents", "defaults", "models"]),
+            )?;
+            openclaw_config_set_json(
+                runner,
+                "models.providers",
+                &nested_value_or_empty_object(&modified_json, &["models", "providers"]),
+            )?;
+            Ok(())
+        },
+    )
 }
 
 pub fn cleanup_openclaw_for_uninstall<R: OpenclawRunner>(
@@ -260,19 +271,70 @@ pub fn cleanup_openclaw_for_uninstall<R: OpenclawRunner>(
         return Ok(UninstallCleanupOutcome::BlockedByDefaultModel);
     }
 
-    let current_json = build_partial_config_for_cleanup(runner)?;
-    let current_content = serde_json::to_string(&current_json)?;
-    let cleaned_content = onboard::remove_clawshell_openclaw_entries(&current_content)?;
-    let cleaned_json: Value = serde_json::from_str(&cleaned_content)?;
-
-    openclaw_config_unset_path_if_exists(runner, "env.CLAWSHELL_API_KEY")?;
-    openclaw_config_set_json(
+    with_gateway_reload_mode_disabled(
         runner,
-        "agents.defaults.models",
-        &nested_value_or_empty_object(&cleaned_json, &["agents", "defaults", "models"]),
+        "clean up OpenClaw configuration during uninstall",
+        |runner| {
+            let current_json = build_partial_config_for_cleanup(runner)?;
+            let current_content = serde_json::to_string(&current_json)?;
+            let cleaned_content = onboard::remove_clawshell_openclaw_entries(&current_content)?;
+            let cleaned_json: Value = serde_json::from_str(&cleaned_content)?;
+
+            openclaw_config_unset_path_if_exists(runner, "env.CLAWSHELL_API_KEY")?;
+            openclaw_config_set_json(
+                runner,
+                "agents.defaults.models",
+                &nested_value_or_empty_object(&cleaned_json, &["agents", "defaults", "models"]),
+            )?;
+            openclaw_config_unset_path_if_exists(runner, "models.providers.clawshell")?;
+            Ok(())
+        },
     )?;
-    openclaw_config_unset_path_if_exists(runner, "models.providers.clawshell")?;
     Ok(UninstallCleanupOutcome::Cleaned)
+}
+
+fn set_gateway_reload_mode<R: OpenclawRunner>(
+    runner: &mut R,
+    mode: &str,
+) -> Result<(), Box<dyn Error>> {
+    let args = vec![
+        "config".to_string(),
+        "set".to_string(),
+        "gateway.reload.mode".to_string(),
+        mode.to_string(),
+    ];
+    run_openclaw_checked(runner, args)?;
+    Ok(())
+}
+
+fn with_gateway_reload_mode_disabled<R, T, F>(
+    runner: &mut R,
+    operation_label: &str,
+    operation: F,
+) -> Result<T, Box<dyn Error>>
+where
+    R: OpenclawRunner,
+    F: FnOnce(&mut R) -> Result<T, Box<dyn Error>>,
+{
+    set_gateway_reload_mode(runner, "off")
+        .map_err(|error| format!("Failed to disable OpenClaw gateway reload mode: {error}"))?;
+
+    let operation_result = operation(runner);
+    let restore_result = set_gateway_reload_mode(runner, "hybrid")
+        .map_err(|error| format!("Failed to restore OpenClaw gateway reload mode: {error}"));
+
+    match (operation_result, restore_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(restore_error)) => Err(format!(
+            "OpenClaw operation succeeded ({operation_label}), but {restore_error}"
+        )
+        .into()),
+        (Err(operation_error), Ok(())) => Err(operation_error),
+        (Err(operation_error), Err(restore_error)) => Err(format!(
+            "OpenClaw operation failed ({operation_label}): {operation_error}; additionally, {restore_error}"
+        )
+        .into()),
+    }
 }
 
 fn build_partial_config_for_mutation<R: OpenclawRunner>(
@@ -462,13 +524,17 @@ fn run_openclaw_raw<R: OpenclawRunner>(
     let display_args = args.join(" ");
     #[cfg(not(test))]
     {
-        let approved = crate::tui::prompt_confirm_compact(
-            &format!("Approve running `openclaw {display_args}`?"),
-            true,
-        )
-        .map_err(|error| {
-            format!("Failed to ask approval for `openclaw {display_args}`: {error}")
-        })?;
+        let approval_message = if is_gateway_reload_mode_toggle_command(&args) {
+            format!(
+                "Approve running `openclaw {display_args}` to work around issue {OPENCLAW_GATEWAY_RELOAD_WORKAROUND_ISSUE_URL}?"
+            )
+        } else {
+            format!("Approve running `openclaw {display_args}`?")
+        };
+        let approved =
+            crate::tui::prompt_confirm_compact(&approval_message, true).map_err(|error| {
+                format!("Failed to ask approval for `openclaw {display_args}`: {error}")
+            })?;
         if !approved {
             return Err(format!("Command not approved: `openclaw {display_args}`").into());
         }
@@ -476,6 +542,15 @@ fn run_openclaw_raw<R: OpenclawRunner>(
     runner.run(&args).map_err(|error| -> Box<dyn Error> {
         format!("Failed to run `openclaw {display_args}`: {error}").into()
     })
+}
+
+#[cfg(not(test))]
+fn is_gateway_reload_mode_toggle_command(args: &[String]) -> bool {
+    args.len() == 4
+        && args[0] == "config"
+        && args[1] == "set"
+        && args[2] == "gateway.reload.mode"
+        && (args[3] == "off" || args[3] == "hybrid")
 }
 
 fn openclaw_command_failed(args: &[String], output: &OpenclawCommandOutput) -> Box<dyn Error> {
@@ -526,6 +601,7 @@ fn nested_value_or_empty_object(json: &Value, path: &[&str]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::collections::VecDeque;
     use std::path::PathBuf;
 
@@ -678,6 +754,7 @@ mod tests {
     #[test]
     fn test_apply_onboard_openclaw_config_writes_expected_sections() {
         let mut runner = FakeOpenclawRunner::default();
+        runner.responses.push_back(ok_output(""));
         runner
             .responses
             .push_back(ok_output(r#"{"EXISTING":"true"}"#));
@@ -690,32 +767,41 @@ mod tests {
         runner.responses.push_back(ok_output(""));
         runner.responses.push_back(ok_output(""));
         runner.responses.push_back(ok_output(""));
+        runner.responses.push_back(ok_output(""));
 
         apply_onboard_openclaw_config(&mut runner, &test_onboard_config()).unwrap();
 
-        assert_eq!(runner.calls.len(), 6);
-        assert_eq!(runner.calls[0], vec!["config", "get", "env", "--json"]);
+        assert_eq!(runner.calls.len(), 8);
         assert_eq!(
-            runner.calls[1],
+            runner.calls[0],
+            vec!["config", "set", "gateway.reload.mode", "off"]
+        );
+        assert_eq!(runner.calls[1], vec!["config", "get", "env", "--json"]);
+        assert_eq!(
+            runner.calls[2],
             vec!["config", "get", "agents.defaults.models", "--json"]
         );
         assert_eq!(
-            runner.calls[2],
+            runner.calls[3],
             vec!["config", "get", "models.providers", "--json"]
         );
-        assert_eq!(runner.calls[3][2], "env");
-        assert_eq!(runner.calls[4][2], "agents.defaults.models");
-        assert_eq!(runner.calls[5][2], "models.providers");
+        assert_eq!(runner.calls[4][2], "env");
+        assert_eq!(runner.calls[5][2], "agents.defaults.models");
+        assert_eq!(runner.calls[6][2], "models.providers");
+        assert_eq!(
+            runner.calls[7],
+            vec!["config", "set", "gateway.reload.mode", "hybrid"]
+        );
 
-        let env_payload: Value = serde_json::from_str(&runner.calls[3][3]).unwrap();
+        let env_payload: Value = serde_json::from_str(&runner.calls[4][3]).unwrap();
         assert_eq!(env_payload["EXISTING"], "true");
         assert_eq!(env_payload["CLAWSHELL_API_KEY"], "virtual_key");
 
-        let models_payload: Value = serde_json::from_str(&runner.calls[4][3]).unwrap();
+        let models_payload: Value = serde_json::from_str(&runner.calls[5][3]).unwrap();
         assert_eq!(models_payload["existing/model"]["alias"], "existing");
         assert_eq!(models_payload["clawshell/gpt-5"]["alias"], "clawshell");
 
-        let providers_payload: Value = serde_json::from_str(&runner.calls[5][3]).unwrap();
+        let providers_payload: Value = serde_json::from_str(&runner.calls[6][3]).unwrap();
         assert_eq!(
             providers_payload["existing"]["baseUrl"],
             "http://example.com"
@@ -763,6 +849,7 @@ mod tests {
     fn test_cleanup_openclaw_for_uninstall_removes_clawshell_entries() {
         let mut runner = FakeOpenclawRunner::default();
         runner.responses.push_back(ok_output("gpt-5"));
+        runner.responses.push_back(ok_output(""));
         runner.responses.push_back(ok_output(
             r#"{"CLAWSHELL_API_KEY":"virtual_key","OTHER":"value"}"#,
         ));
@@ -772,35 +859,151 @@ mod tests {
         runner.responses.push_back(ok_output(""));
         runner.responses.push_back(ok_output(""));
         runner.responses.push_back(ok_output(""));
+        runner.responses.push_back(ok_output(""));
 
         let outcome = cleanup_openclaw_for_uninstall(&mut runner).unwrap();
         assert_eq!(outcome, UninstallCleanupOutcome::Cleaned);
-        assert_eq!(runner.calls.len(), 6);
+        assert_eq!(runner.calls.len(), 8);
         assert_eq!(
             runner.calls[0],
             vec!["config", "get", "agents.defaults.model", "--json"]
         );
-        assert_eq!(runner.calls[1], vec!["config", "get", "env", "--json"]);
         assert_eq!(
-            runner.calls[2],
+            runner.calls[1],
+            vec!["config", "set", "gateway.reload.mode", "off"]
+        );
+        assert_eq!(runner.calls[2], vec!["config", "get", "env", "--json"]);
+        assert_eq!(
+            runner.calls[3],
             vec!["config", "get", "agents.defaults.models", "--json"]
         );
         assert_eq!(
-            runner.calls[3],
+            runner.calls[4],
             vec!["config", "unset", "env.CLAWSHELL_API_KEY"]
         );
-        assert_eq!(runner.calls[4][0], "config");
-        assert_eq!(runner.calls[4][1], "set");
-        assert_eq!(runner.calls[4][2], "agents.defaults.models");
+        assert_eq!(runner.calls[5][0], "config");
+        assert_eq!(runner.calls[5][1], "set");
+        assert_eq!(runner.calls[5][2], "agents.defaults.models");
         assert_eq!(
-            runner.calls[5],
+            runner.calls[6],
             vec!["config", "unset", "models.providers.clawshell"]
         );
+        assert_eq!(
+            runner.calls[7],
+            vec!["config", "set", "gateway.reload.mode", "hybrid"]
+        );
 
-        let models_payload: Value = serde_json::from_str(&runner.calls[4][3]).unwrap();
+        let models_payload: Value = serde_json::from_str(&runner.calls[5][3]).unwrap();
         assert_eq!(models_payload["existing/model"]["alias"], "existing");
         assert!(models_payload.get("clawshell/gpt-5").is_none());
-        assert_eq!(runner.calls[4][4], "--json");
+        assert_eq!(runner.calls[5][4], "--json");
+    }
+
+    #[test]
+    fn test_with_gateway_reload_mode_disabled_restores_hybrid_when_operation_fails() {
+        let mut runner = FakeOpenclawRunner::default();
+        runner.responses.push_back(ok_output(""));
+        runner
+            .responses
+            .push_back(failed_output(2, "mutation failed"));
+        runner.responses.push_back(ok_output(""));
+
+        let result = with_gateway_reload_mode_disabled(&mut runner, "test operation", |runner| {
+            openclaw_config_set_json(runner, "env", &serde_json::json!({"k":"v"}))
+        });
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("mutation failed"));
+        assert_eq!(
+            runner.calls,
+            vec![
+                vec![
+                    "config".to_string(),
+                    "set".to_string(),
+                    "gateway.reload.mode".to_string(),
+                    "off".to_string()
+                ],
+                vec![
+                    "config".to_string(),
+                    "set".to_string(),
+                    "env".to_string(),
+                    "{\"k\":\"v\"}".to_string(),
+                    "--json".to_string()
+                ],
+                vec![
+                    "config".to_string(),
+                    "set".to_string(),
+                    "gateway.reload.mode".to_string(),
+                    "hybrid".to_string()
+                ]
+            ]
+        );
+    }
+
+    #[test]
+    fn test_with_gateway_reload_mode_disabled_reports_restore_failure_after_success() {
+        let mut runner = FakeOpenclawRunner::default();
+        runner.responses.push_back(ok_output(""));
+        runner.responses.push_back(ok_output(""));
+        runner
+            .responses
+            .push_back(failed_output(2, "restore failed"));
+
+        let result = with_gateway_reload_mode_disabled(&mut runner, "test operation", |runner| {
+            openclaw_config_set_json(runner, "env", &serde_json::json!({"k":"v"}))
+        });
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("test operation"));
+        assert!(error.contains("restore failed"));
+    }
+
+    #[test]
+    fn test_with_gateway_reload_mode_disabled_reports_both_failures() {
+        let mut runner = FakeOpenclawRunner::default();
+        runner.responses.push_back(ok_output(""));
+        runner
+            .responses
+            .push_back(failed_output(2, "mutation failed"));
+        runner
+            .responses
+            .push_back(failed_output(3, "restore failed"));
+
+        let result = with_gateway_reload_mode_disabled(&mut runner, "test operation", |runner| {
+            openclaw_config_set_json(runner, "env", &serde_json::json!({"k":"v"}))
+        });
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("test operation"));
+        assert!(error.contains("mutation failed"));
+        assert!(error.contains("restore failed"));
+    }
+
+    #[test]
+    fn test_with_gateway_reload_mode_disabled_does_not_run_operation_when_disable_fails() {
+        let mut runner = FakeOpenclawRunner::default();
+        runner
+            .responses
+            .push_back(failed_output(2, "disable failed"));
+        let operation_called = Cell::new(false);
+
+        let result = with_gateway_reload_mode_disabled(&mut runner, "test operation", |_runner| {
+            operation_called.set(true);
+            Ok(())
+        });
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("disable failed"));
+        assert!(!operation_called.get());
+        assert_eq!(
+            runner.calls,
+            vec![vec![
+                "config".to_string(),
+                "set".to_string(),
+                "gateway.reload.mode".to_string(),
+                "off".to_string()
+            ]]
+        );
     }
 
     #[cfg(unix)]
