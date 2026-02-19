@@ -34,6 +34,10 @@ impl OpenclawRunner for RealOpenclawRunner {
                 let (uid, gid) = resolve_non_root_ids_for_openclaw()?;
                 command.uid(uid);
                 command.gid(gid);
+                let user_env = resolve_non_root_user_env_for_openclaw(uid)?;
+                command.env("HOME", user_env.home_dir);
+                command.env("USER", user_env.username.as_str());
+                command.env("LOGNAME", user_env.username.as_str());
             }
         }
         let output = command
@@ -87,6 +91,121 @@ fn resolve_non_root_ids_for_openclaw() -> Result<(u32, u32), String> {
 #[cfg(unix)]
 fn parse_env_u32(name: &str) -> Option<u32> {
     std::env::var(name).ok()?.parse::<u32>().ok()
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenclawTargetUserEnv {
+    username: String,
+    home_dir: String,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnixUserRecord {
+    username: String,
+    uid: u32,
+    home_dir: String,
+}
+
+#[cfg(unix)]
+fn resolve_non_root_user_env_for_openclaw(uid: u32) -> Result<OpenclawTargetUserEnv, String> {
+    resolve_non_root_user_env_for_openclaw_with_lookup(
+        uid,
+        std::env::var("SUDO_USER").ok(),
+        lookup_unix_user_by_name,
+        lookup_unix_user_by_uid,
+    )
+}
+
+#[cfg(unix)]
+fn resolve_non_root_user_env_for_openclaw_with_lookup<FN, FU>(
+    uid: u32,
+    sudo_user: Option<String>,
+    lookup_by_name: FN,
+    lookup_by_uid: FU,
+) -> Result<OpenclawTargetUserEnv, String>
+where
+    FN: Fn(&str) -> Result<Option<UnixUserRecord>, String>,
+    FU: Fn(u32) -> Result<Option<UnixUserRecord>, String>,
+{
+    let normalized_sudo_user = sudo_user
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != "root");
+
+    if let Some(user_name) = normalized_sudo_user {
+        let from_sudo_user = lookup_by_name(user_name)?;
+        if let Some(record) = from_sudo_user
+            && record.uid == uid
+        {
+            return map_record_to_target_env(record, uid);
+        }
+    }
+
+    let from_uid = lookup_by_uid(uid)?;
+    if let Some(record) = from_uid {
+        return map_record_to_target_env(record, uid);
+    }
+
+    Err(format!(
+        "failed to resolve non-root target account metadata for uid {uid}; could not determine HOME/USER/LOGNAME for `openclaw`."
+    ))
+}
+
+#[cfg(unix)]
+fn map_record_to_target_env(
+    record: UnixUserRecord,
+    target_uid: u32,
+) -> Result<OpenclawTargetUserEnv, String> {
+    let username = record.username.trim();
+    if username.is_empty() {
+        return Err(format!(
+            "failed to resolve non-root target account metadata for uid {target_uid}; username is empty."
+        ));
+    }
+
+    let home_dir = record.home_dir.trim();
+    if home_dir.is_empty() {
+        return Err(format!(
+            "failed to resolve non-root target account metadata for uid {target_uid}; home directory is empty."
+        ));
+    }
+
+    Ok(OpenclawTargetUserEnv {
+        username: username.to_string(),
+        home_dir: home_dir.to_string(),
+    })
+}
+
+#[cfg(unix)]
+fn lookup_unix_user_by_name(name: &str) -> Result<Option<UnixUserRecord>, String> {
+    match nix::unistd::User::from_name(name) {
+        Ok(Some(user)) => Ok(Some(UnixUserRecord {
+            username: user.name,
+            uid: user.uid.as_raw(),
+            home_dir: user.dir.to_string_lossy().to_string(),
+        })),
+        Ok(None) => Ok(None),
+        Err(error) => Err(format!(
+            "failed to resolve user '{name}' for non-root openclaw execution: {error}"
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn lookup_unix_user_by_uid(uid: u32) -> Result<Option<UnixUserRecord>, String> {
+    match nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)) {
+        Ok(Some(user)) => Ok(Some(UnixUserRecord {
+            username: user.name,
+            uid: user.uid.as_raw(),
+            home_dir: user.dir.to_string_lossy().to_string(),
+        })),
+        Ok(None) => Ok(None),
+        Err(error) => Err(format!(
+            "failed to resolve uid {uid} for non-root openclaw execution: {error}"
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -682,5 +801,78 @@ mod tests {
         assert_eq!(models_payload["existing/model"]["alias"], "existing");
         assert!(models_payload.get("clawshell/gpt-5").is_none());
         assert_eq!(runner.calls[4][4], "--json");
+    }
+
+    #[cfg(unix)]
+    fn fake_user(name: &str, uid: u32, home: &str) -> UnixUserRecord {
+        UnixUserRecord {
+            username: name.to_string(),
+            uid,
+            home_dir: home.to_string(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_non_root_user_env_prefers_matching_sudo_user() {
+        let resolved = resolve_non_root_user_env_for_openclaw_with_lookup(
+            1000,
+            Some("dev".to_string()),
+            |name| {
+                if name == "dev" {
+                    Ok(Some(fake_user("dev", 1000, "/home/dev")))
+                } else {
+                    Ok(None)
+                }
+            },
+            |_uid| Ok(Some(fake_user("fallback", 1000, "/home/fallback"))),
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            OpenclawTargetUserEnv {
+                username: "dev".to_string(),
+                home_dir: "/home/dev".to_string(),
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_non_root_user_env_falls_back_to_uid_lookup() {
+        let resolved = resolve_non_root_user_env_for_openclaw_with_lookup(
+            1000,
+            Some("dev".to_string()),
+            |_name| Ok(Some(fake_user("dev", 2000, "/home/dev"))),
+            |uid| {
+                assert_eq!(uid, 1000);
+                Ok(Some(fake_user("actual", 1000, "/home/actual")))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            OpenclawTargetUserEnv {
+                username: "actual".to_string(),
+                home_dir: "/home/actual".to_string(),
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_non_root_user_env_errors_when_metadata_missing() {
+        let error = resolve_non_root_user_env_for_openclaw_with_lookup(
+            1000,
+            Some("dev".to_string()),
+            |_name| Ok(None),
+            |_uid| Ok(None),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("failed to resolve non-root target account metadata"));
+        assert!(error.contains("uid 1000"));
     }
 }
