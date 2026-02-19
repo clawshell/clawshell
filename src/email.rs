@@ -301,13 +301,18 @@ struct ImapCommandOutput {
 struct BlockingImapSession {
     stream: BufReader<StreamOwned<ClientConnection, TcpStream>>,
     next_tag: u32,
+    gmail_thread_id_capable: bool,
 }
 
 impl BlockingImapSession {
-    fn new(stream: StreamOwned<ClientConnection, TcpStream>) -> Self {
+    fn new(
+        stream: StreamOwned<ClientConnection, TcpStream>,
+        gmail_thread_id_capable: bool,
+    ) -> Self {
         Self {
             stream: BufReader::new(stream),
             next_tag: 1,
+            gmail_thread_id_capable,
         }
     }
 
@@ -389,9 +394,16 @@ impl BlockingImapSession {
         &mut self,
         uid: u64,
     ) -> Result<Option<EmailMessageMetadata>, EmailServiceError> {
-        let output = self.run_command(&format!(
-            "UID FETCH {uid} (UID FLAGS INTERNALDATE X-GM-THRID BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])"
-        ))?;
+        let command = if self.gmail_thread_id_capable {
+            format!(
+                "UID FETCH {uid} (UID FLAGS INTERNALDATE X-GM-THRID BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])"
+            )
+        } else {
+            format!(
+                "UID FETCH {uid} (UID FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])"
+            )
+        };
+        let output = self.run_command(&command)?;
 
         let Some(fetch_line) = output
             .lines
@@ -436,9 +448,12 @@ impl BlockingImapSession {
         &mut self,
         uid: u64,
     ) -> Result<Option<EmailMessageContent>, EmailServiceError> {
-        let output = self.run_command(&format!(
-            "UID FETCH {uid} (UID FLAGS INTERNALDATE X-GM-THRID BODY.PEEK[])"
-        ))?;
+        let command = if self.gmail_thread_id_capable {
+            format!("UID FETCH {uid} (UID FLAGS INTERNALDATE X-GM-THRID BODY.PEEK[])")
+        } else {
+            format!("UID FETCH {uid} (UID FLAGS INTERNALDATE BODY.PEEK[])")
+        };
+        let output = self.run_command(&command)?;
 
         let Some(fetch_line) = output
             .lines
@@ -610,7 +625,8 @@ fn connect_and_login(
     })?;
     let stream = StreamOwned::new(connection, socket);
 
-    let mut session = BlockingImapSession::new(stream);
+    let gmail_thread_id_capable = is_gmail_imap_host(host);
+    let mut session = BlockingImapSession::new(stream, gmail_thread_id_capable);
     session.expect_greeting()?;
 
     let username = credentials.email.trim();
@@ -628,6 +644,10 @@ fn connect_and_login(
 
     session.login(username, password)?;
     Ok(session)
+}
+
+fn is_gmail_imap_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("imap.gmail.com") || host.eq_ignore_ascii_case("imap.googlemail.com")
 }
 
 fn normalize_search_term(value: &str) -> Option<String> {
@@ -1120,5 +1140,13 @@ mod tests {
 
         assert!(text_body.is_none());
         assert_eq!(html_body.as_deref(), Some("<h1>Hello</h1>"));
+    }
+
+    #[test]
+    fn test_is_gmail_imap_host() {
+        assert!(is_gmail_imap_host("imap.gmail.com"));
+        assert!(is_gmail_imap_host("IMAP.GOOGLEMAIL.COM"));
+        assert!(!is_gmail_imap_host("imap.mail.yahoo.com"));
+        assert!(!is_gmail_imap_host("imap.example.com"));
     }
 }
