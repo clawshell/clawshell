@@ -1542,7 +1542,12 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
             "OpenClaw workaround",
             "Temporarily setting `gateway.reload.mode` to `off` during uninstall cleanup, then restoring `hybrid`.",
         );
-        match openclaw_cli::cleanup_openclaw_for_uninstall(&mut openclaw_runner)? {
+        let approval_mode = if skip_confirm {
+            openclaw_cli::OpenclawApprovalMode::AutoApprove
+        } else {
+            openclaw_cli::OpenclawApprovalMode::PromptUser
+        };
+        match openclaw_cli::cleanup_openclaw_for_uninstall(&mut openclaw_runner, approval_mode)? {
             openclaw_cli::UninstallCleanupOutcome::BlockedByDefaultModel => {
                 tui::print_error(
                     "ClawShell model is currently set as the default model in OpenClaw.",

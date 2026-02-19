@@ -218,11 +218,21 @@ pub enum UninstallCleanupOutcome {
     Cleaned,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenclawApprovalMode {
+    PromptUser,
+    AutoApprove,
+}
+
 pub fn run_openclaw_command<R: OpenclawRunner>(
     runner: &mut R,
     args: &[&str],
 ) -> Result<OpenclawCommandOutput, Box<dyn Error>> {
-    run_openclaw_raw(runner, args.iter().map(|s| (*s).to_string()).collect())
+    run_openclaw_raw(
+        runner,
+        args.iter().map(|s| (*s).to_string()).collect(),
+        OpenclawApprovalMode::PromptUser,
+    )
 }
 
 pub fn apply_onboard_openclaw_config<R: OpenclawRunner>(
@@ -232,8 +242,10 @@ pub fn apply_onboard_openclaw_config<R: OpenclawRunner>(
     with_gateway_reload_mode_disabled(
         runner,
         "apply onboarding OpenClaw configuration changes",
+        OpenclawApprovalMode::PromptUser,
         |runner| {
-            let current_json = build_partial_config_for_mutation(runner)?;
+            let current_json =
+                build_partial_config_for_mutation(runner, OpenclawApprovalMode::PromptUser)?;
             let current_content = serde_json::to_string(&current_json)?;
             let modified_content =
                 onboard::patch_openclaw_config_for_clawshell(&current_content, config)?;
@@ -243,16 +255,19 @@ pub fn apply_onboard_openclaw_config<R: OpenclawRunner>(
                 runner,
                 "env",
                 &nested_value_or_empty_object(&modified_json, &["env"]),
+                OpenclawApprovalMode::PromptUser,
             )?;
             openclaw_config_set_json(
                 runner,
                 "agents.defaults.models",
                 &nested_value_or_empty_object(&modified_json, &["agents", "defaults", "models"]),
+                OpenclawApprovalMode::PromptUser,
             )?;
             openclaw_config_set_json(
                 runner,
                 "models.providers",
                 &nested_value_or_empty_object(&modified_json, &["models", "providers"]),
+                OpenclawApprovalMode::PromptUser,
             )?;
             Ok(())
         },
@@ -261,9 +276,13 @@ pub fn apply_onboard_openclaw_config<R: OpenclawRunner>(
 
 pub fn cleanup_openclaw_for_uninstall<R: OpenclawRunner>(
     runner: &mut R,
+    approval_mode: OpenclawApprovalMode,
 ) -> Result<UninstallCleanupOutcome, Box<dyn Error>> {
-    let current_default_model =
-        openclaw_config_get_string_optional_at_path(runner, "agents.defaults.model")?;
+    let current_default_model = openclaw_config_get_string_optional_at_path(
+        runner,
+        "agents.defaults.model",
+        approval_mode,
+    )?;
     if current_default_model
         .as_deref()
         .is_some_and(is_clawshell_default_model_name)
@@ -274,19 +293,25 @@ pub fn cleanup_openclaw_for_uninstall<R: OpenclawRunner>(
     with_gateway_reload_mode_disabled(
         runner,
         "clean up OpenClaw configuration during uninstall",
+        approval_mode,
         |runner| {
-            let current_json = build_partial_config_for_cleanup(runner)?;
+            let current_json = build_partial_config_for_cleanup(runner, approval_mode)?;
             let current_content = serde_json::to_string(&current_json)?;
             let cleaned_content = onboard::remove_clawshell_openclaw_entries(&current_content)?;
             let cleaned_json: Value = serde_json::from_str(&cleaned_content)?;
 
-            openclaw_config_unset_path_if_exists(runner, "env.CLAWSHELL_API_KEY")?;
+            openclaw_config_unset_path_if_exists(runner, "env.CLAWSHELL_API_KEY", approval_mode)?;
             openclaw_config_set_json(
                 runner,
                 "agents.defaults.models",
                 &nested_value_or_empty_object(&cleaned_json, &["agents", "defaults", "models"]),
+                approval_mode,
             )?;
-            openclaw_config_unset_path_if_exists(runner, "models.providers.clawshell")?;
+            openclaw_config_unset_path_if_exists(
+                runner,
+                "models.providers.clawshell",
+                approval_mode,
+            )?;
             Ok(())
         },
     )?;
@@ -296,6 +321,7 @@ pub fn cleanup_openclaw_for_uninstall<R: OpenclawRunner>(
 fn set_gateway_reload_mode<R: OpenclawRunner>(
     runner: &mut R,
     mode: &str,
+    approval_mode: OpenclawApprovalMode,
 ) -> Result<(), Box<dyn Error>> {
     let args = vec![
         "config".to_string(),
@@ -303,24 +329,25 @@ fn set_gateway_reload_mode<R: OpenclawRunner>(
         "gateway.reload.mode".to_string(),
         mode.to_string(),
     ];
-    run_openclaw_checked(runner, args)?;
+    run_openclaw_checked(runner, args, approval_mode)?;
     Ok(())
 }
 
 fn with_gateway_reload_mode_disabled<R, T, F>(
     runner: &mut R,
     operation_label: &str,
+    approval_mode: OpenclawApprovalMode,
     operation: F,
 ) -> Result<T, Box<dyn Error>>
 where
     R: OpenclawRunner,
     F: FnOnce(&mut R) -> Result<T, Box<dyn Error>>,
 {
-    set_gateway_reload_mode(runner, "off")
+    set_gateway_reload_mode(runner, "off", approval_mode)
         .map_err(|error| format!("Failed to disable OpenClaw gateway reload mode: {error}"))?;
 
     let operation_result = operation(runner);
-    let restore_result = set_gateway_reload_mode(runner, "hybrid")
+    let restore_result = set_gateway_reload_mode(runner, "hybrid", approval_mode)
         .map_err(|error| format!("Failed to restore OpenClaw gateway reload mode: {error}"));
 
     match (operation_result, restore_result) {
@@ -339,11 +366,16 @@ where
 
 fn build_partial_config_for_mutation<R: OpenclawRunner>(
     runner: &mut R,
+    approval_mode: OpenclawApprovalMode,
 ) -> Result<Value, Box<dyn Error>> {
-    let env = openclaw_config_get_object_at_path_or_empty(runner, "env")?;
-    let default_models =
-        openclaw_config_get_object_at_path_or_empty(runner, "agents.defaults.models")?;
-    let providers = openclaw_config_get_object_at_path_or_empty(runner, "models.providers")?;
+    let env = openclaw_config_get_object_at_path_or_empty(runner, "env", approval_mode)?;
+    let default_models = openclaw_config_get_object_at_path_or_empty(
+        runner,
+        "agents.defaults.models",
+        approval_mode,
+    )?;
+    let providers =
+        openclaw_config_get_object_at_path_or_empty(runner, "models.providers", approval_mode)?;
     Ok(serde_json::json!({
         "env": env,
         "agents": {
@@ -359,10 +391,14 @@ fn build_partial_config_for_mutation<R: OpenclawRunner>(
 
 fn build_partial_config_for_cleanup<R: OpenclawRunner>(
     runner: &mut R,
+    approval_mode: OpenclawApprovalMode,
 ) -> Result<Value, Box<dyn Error>> {
-    let env = openclaw_config_get_object_at_path_or_empty(runner, "env")?;
-    let default_models =
-        openclaw_config_get_object_at_path_or_empty(runner, "agents.defaults.models")?;
+    let env = openclaw_config_get_object_at_path_or_empty(runner, "env", approval_mode)?;
+    let default_models = openclaw_config_get_object_at_path_or_empty(
+        runner,
+        "agents.defaults.models",
+        approval_mode,
+    )?;
     Ok(serde_json::json!({
         "env": env,
         "agents": {
@@ -380,8 +416,9 @@ fn is_clawshell_default_model_name(model: &str) -> bool {
 fn openclaw_config_get_object_at_path_or_empty<R: OpenclawRunner>(
     runner: &mut R,
     path: &str,
+    approval_mode: OpenclawApprovalMode,
 ) -> Result<Value, Box<dyn Error>> {
-    match openclaw_config_get_json_at_path(runner, path) {
+    match openclaw_config_get_json_at_path(runner, path, approval_mode) {
         Ok(value) => match value {
             Value::Object(_) => Ok(value),
             Value::Null => Ok(serde_json::json!({})),
@@ -398,8 +435,9 @@ fn openclaw_config_get_object_at_path_or_empty<R: OpenclawRunner>(
 fn openclaw_config_get_string_optional_at_path<R: OpenclawRunner>(
     runner: &mut R,
     path: &str,
+    approval_mode: OpenclawApprovalMode,
 ) -> Result<Option<String>, Box<dyn Error>> {
-    match openclaw_config_get_json_at_path(runner, path) {
+    match openclaw_config_get_json_at_path(runner, path, approval_mode) {
         Ok(value) => extract_string_like_value(path, &value),
         Err(error) if is_missing_config_path_error(&error.to_string()) => Ok(None),
         Err(error) => Err(error),
@@ -450,6 +488,7 @@ fn scalar_to_string(value: &Value) -> Option<String> {
 fn openclaw_config_get_json_at_path<R: OpenclawRunner>(
     runner: &mut R,
     path: &str,
+    approval_mode: OpenclawApprovalMode,
 ) -> Result<Value, Box<dyn Error>> {
     let args = vec![
         "config".to_string(),
@@ -457,7 +496,7 @@ fn openclaw_config_get_json_at_path<R: OpenclawRunner>(
         path.to_string(),
         "--json".to_string(),
     ];
-    let stdout = run_openclaw_checked(runner, args)?;
+    let stdout = run_openclaw_checked(runner, args, approval_mode)?;
     parse_config_get_output(&stdout)
 }
 
@@ -476,6 +515,7 @@ fn openclaw_config_set_json<R: OpenclawRunner>(
     runner: &mut R,
     path: &str,
     value: &Value,
+    approval_mode: OpenclawApprovalMode,
 ) -> Result<(), Box<dyn Error>> {
     let payload = serde_json::to_string(value)?;
     let args = vec![
@@ -485,16 +525,17 @@ fn openclaw_config_set_json<R: OpenclawRunner>(
         payload,
         "--json".to_string(),
     ];
-    run_openclaw_checked(runner, args)?;
+    run_openclaw_checked(runner, args, approval_mode)?;
     Ok(())
 }
 
 fn openclaw_config_unset_path_if_exists<R: OpenclawRunner>(
     runner: &mut R,
     path: &str,
+    approval_mode: OpenclawApprovalMode,
 ) -> Result<(), Box<dyn Error>> {
     let args = vec!["config".to_string(), "unset".to_string(), path.to_string()];
-    let output = run_openclaw_raw(runner, args.clone())?;
+    let output = run_openclaw_raw(runner, args.clone(), approval_mode)?;
     if output.success {
         return Ok(());
     }
@@ -509,8 +550,9 @@ fn openclaw_config_unset_path_if_exists<R: OpenclawRunner>(
 fn run_openclaw_checked<R: OpenclawRunner>(
     runner: &mut R,
     args: Vec<String>,
+    approval_mode: OpenclawApprovalMode,
 ) -> Result<String, Box<dyn Error>> {
-    let output = run_openclaw_raw(runner, args.clone())?;
+    let output = run_openclaw_raw(runner, args.clone(), approval_mode)?;
     if !output.success {
         return Err(openclaw_command_failed(&args, &output));
     }
@@ -520,23 +562,28 @@ fn run_openclaw_checked<R: OpenclawRunner>(
 fn run_openclaw_raw<R: OpenclawRunner>(
     runner: &mut R,
     args: Vec<String>,
+    approval_mode: OpenclawApprovalMode,
 ) -> Result<OpenclawCommandOutput, Box<dyn Error>> {
     let display_args = args.join(" ");
+    #[cfg(test)]
+    let _ = approval_mode;
     #[cfg(not(test))]
     {
-        let approval_message = if is_gateway_reload_mode_toggle_command(&args) {
-            format!(
-                "Approve running `openclaw {display_args}` to work around issue {OPENCLAW_GATEWAY_RELOAD_WORKAROUND_ISSUE_URL}?"
-            )
-        } else {
-            format!("Approve running `openclaw {display_args}`?")
-        };
-        let approved =
-            crate::tui::prompt_confirm_compact(&approval_message, true).map_err(|error| {
-                format!("Failed to ask approval for `openclaw {display_args}`: {error}")
-            })?;
-        if !approved {
-            return Err(format!("Command not approved: `openclaw {display_args}`").into());
+        if matches!(approval_mode, OpenclawApprovalMode::PromptUser) {
+            let approval_message = if is_gateway_reload_mode_toggle_command(&args) {
+                format!(
+                    "Approve running `openclaw {display_args}` to work around issue {OPENCLAW_GATEWAY_RELOAD_WORKAROUND_ISSUE_URL}?"
+                )
+            } else {
+                format!("Approve running `openclaw {display_args}`?")
+            };
+            let approved =
+                crate::tui::prompt_confirm_compact(&approval_message, true).map_err(|error| {
+                    format!("Failed to ask approval for `openclaw {display_args}`: {error}")
+                })?;
+            if !approved {
+                return Err(format!("Command not approved: `openclaw {display_args}`").into());
+            }
         }
     }
     runner.run(&args).map_err(|error| -> Box<dyn Error> {
@@ -605,6 +652,9 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::PathBuf;
 
+    const PROMPT_MODE: OpenclawApprovalMode = OpenclawApprovalMode::PromptUser;
+    const AUTO_MODE: OpenclawApprovalMode = OpenclawApprovalMode::AutoApprove;
+
     fn ok_output(stdout: &str) -> Result<OpenclawCommandOutput, String> {
         Ok(OpenclawCommandOutput {
             success: true,
@@ -651,6 +701,21 @@ mod tests {
         }
     }
 
+    fn queue_cleanup_success_responses(runner: &mut FakeOpenclawRunner) {
+        runner.responses.push_back(ok_output("gpt-5"));
+        runner.responses.push_back(ok_output(""));
+        runner.responses.push_back(ok_output(
+            r#"{"CLAWSHELL_API_KEY":"virtual_key","OTHER":"value"}"#,
+        ));
+        runner.responses.push_back(ok_output(
+            r#"{"clawshell/gpt-5":{"alias":"clawshell"},"existing/model":{"alias":"existing"}}"#,
+        ));
+        runner.responses.push_back(ok_output(""));
+        runner.responses.push_back(ok_output(""));
+        runner.responses.push_back(ok_output(""));
+        runner.responses.push_back(ok_output(""));
+    }
+
     #[test]
     fn test_openclaw_config_get_json_at_path_parses_json() {
         let mut runner = FakeOpenclawRunner::default();
@@ -658,7 +723,7 @@ mod tests {
             .responses
             .push_back(ok_output(r#"{"CLAWSHELL_API_KEY":"abc"}"#));
 
-        let json = openclaw_config_get_json_at_path(&mut runner, "env").unwrap();
+        let json = openclaw_config_get_json_at_path(&mut runner, "env", PROMPT_MODE).unwrap();
         assert_eq!(json["CLAWSHELL_API_KEY"], "abc");
         assert_eq!(
             runner.calls,
@@ -676,7 +741,9 @@ mod tests {
         let mut runner = FakeOpenclawRunner::default();
         runner.responses.push_back(ok_output("clawshell/gpt-5\n"));
 
-        let value = openclaw_config_get_json_at_path(&mut runner, "agents.defaults.model").unwrap();
+        let value =
+            openclaw_config_get_json_at_path(&mut runner, "agents.defaults.model", PROMPT_MODE)
+                .unwrap();
         assert_eq!(value, Value::String("clawshell/gpt-5".to_string()));
     }
 
@@ -685,7 +752,7 @@ mod tests {
         let mut runner = FakeOpenclawRunner::default();
         runner.responses.push_back(failed_output(2, "boom"));
 
-        let error = openclaw_config_get_json_at_path(&mut runner, "env")
+        let error = openclaw_config_get_json_at_path(&mut runner, "env", PROMPT_MODE)
             .unwrap_err()
             .to_string();
         assert!(error.contains("openclaw config get env"));
@@ -699,7 +766,8 @@ mod tests {
             .responses
             .push_back(failed_output(1, "path not found: env"));
 
-        let value = openclaw_config_get_object_at_path_or_empty(&mut runner, "env").unwrap();
+        let value =
+            openclaw_config_get_object_at_path_or_empty(&mut runner, "env", PROMPT_MODE).unwrap();
         assert_eq!(value, serde_json::json!({}));
     }
 
@@ -712,6 +780,7 @@ mod tests {
             &mut runner,
             "env",
             &serde_json::json!({"CLAWSHELL_API_KEY":"abc"}),
+            PROMPT_MODE,
         )
         .unwrap();
 
@@ -729,7 +798,8 @@ mod tests {
         let mut runner = FakeOpenclawRunner::default();
         runner.responses.push_back(ok_output(""));
 
-        openclaw_config_unset_path_if_exists(&mut runner, "env.CLAWSHELL_API_KEY").unwrap();
+        openclaw_config_unset_path_if_exists(&mut runner, "env.CLAWSHELL_API_KEY", PROMPT_MODE)
+            .unwrap();
 
         assert_eq!(
             runner.calls,
@@ -748,7 +818,8 @@ mod tests {
             .responses
             .push_back(failed_output(1, "path not found: env.CLAWSHELL_API_KEY"));
 
-        openclaw_config_unset_path_if_exists(&mut runner, "env.CLAWSHELL_API_KEY").unwrap();
+        openclaw_config_unset_path_if_exists(&mut runner, "env.CLAWSHELL_API_KEY", PROMPT_MODE)
+            .unwrap();
     }
 
     #[test]
@@ -819,7 +890,7 @@ mod tests {
             .responses
             .push_back(ok_output(r#"{"primary":"clawshell/gpt-5.2-chat-latest"}"#));
 
-        let outcome = cleanup_openclaw_for_uninstall(&mut runner).unwrap();
+        let outcome = cleanup_openclaw_for_uninstall(&mut runner, PROMPT_MODE).unwrap();
         assert_eq!(outcome, UninstallCleanupOutcome::BlockedByDefaultModel);
         assert_eq!(
             runner.calls,
@@ -839,29 +910,21 @@ mod tests {
             .responses
             .push_back(ok_output(r#"{"primary":"clawshell/gpt-5.2-chat-latest"}"#));
 
-        let value =
-            openclaw_config_get_string_optional_at_path(&mut runner, "agents.defaults.model")
-                .unwrap();
+        let value = openclaw_config_get_string_optional_at_path(
+            &mut runner,
+            "agents.defaults.model",
+            PROMPT_MODE,
+        )
+        .unwrap();
         assert_eq!(value.as_deref(), Some("clawshell/gpt-5.2-chat-latest"));
     }
 
     #[test]
     fn test_cleanup_openclaw_for_uninstall_removes_clawshell_entries() {
         let mut runner = FakeOpenclawRunner::default();
-        runner.responses.push_back(ok_output("gpt-5"));
-        runner.responses.push_back(ok_output(""));
-        runner.responses.push_back(ok_output(
-            r#"{"CLAWSHELL_API_KEY":"virtual_key","OTHER":"value"}"#,
-        ));
-        runner.responses.push_back(ok_output(
-            r#"{"clawshell/gpt-5":{"alias":"clawshell"},"existing/model":{"alias":"existing"}}"#,
-        ));
-        runner.responses.push_back(ok_output(""));
-        runner.responses.push_back(ok_output(""));
-        runner.responses.push_back(ok_output(""));
-        runner.responses.push_back(ok_output(""));
+        queue_cleanup_success_responses(&mut runner);
 
-        let outcome = cleanup_openclaw_for_uninstall(&mut runner).unwrap();
+        let outcome = cleanup_openclaw_for_uninstall(&mut runner, PROMPT_MODE).unwrap();
         assert_eq!(outcome, UninstallCleanupOutcome::Cleaned);
         assert_eq!(runner.calls.len(), 8);
         assert_eq!(
@@ -900,6 +963,22 @@ mod tests {
     }
 
     #[test]
+    fn test_cleanup_openclaw_for_uninstall_autoapprove_matches_prompt_mode_sequence() {
+        let mut prompt_runner = FakeOpenclawRunner::default();
+        let mut auto_runner = FakeOpenclawRunner::default();
+        queue_cleanup_success_responses(&mut prompt_runner);
+        queue_cleanup_success_responses(&mut auto_runner);
+
+        let prompt_outcome =
+            cleanup_openclaw_for_uninstall(&mut prompt_runner, PROMPT_MODE).unwrap();
+        let auto_outcome = cleanup_openclaw_for_uninstall(&mut auto_runner, AUTO_MODE).unwrap();
+
+        assert_eq!(prompt_outcome, UninstallCleanupOutcome::Cleaned);
+        assert_eq!(auto_outcome, UninstallCleanupOutcome::Cleaned);
+        assert_eq!(prompt_runner.calls, auto_runner.calls);
+    }
+
+    #[test]
     fn test_with_gateway_reload_mode_disabled_restores_hybrid_when_operation_fails() {
         let mut runner = FakeOpenclawRunner::default();
         runner.responses.push_back(ok_output(""));
@@ -908,9 +987,14 @@ mod tests {
             .push_back(failed_output(2, "mutation failed"));
         runner.responses.push_back(ok_output(""));
 
-        let result = with_gateway_reload_mode_disabled(&mut runner, "test operation", |runner| {
-            openclaw_config_set_json(runner, "env", &serde_json::json!({"k":"v"}))
-        });
+        let result = with_gateway_reload_mode_disabled(
+            &mut runner,
+            "test operation",
+            PROMPT_MODE,
+            |runner| {
+                openclaw_config_set_json(runner, "env", &serde_json::json!({"k":"v"}), PROMPT_MODE)
+            },
+        );
 
         let error = result.unwrap_err().to_string();
         assert!(error.contains("mutation failed"));
@@ -949,9 +1033,14 @@ mod tests {
             .responses
             .push_back(failed_output(2, "restore failed"));
 
-        let result = with_gateway_reload_mode_disabled(&mut runner, "test operation", |runner| {
-            openclaw_config_set_json(runner, "env", &serde_json::json!({"k":"v"}))
-        });
+        let result = with_gateway_reload_mode_disabled(
+            &mut runner,
+            "test operation",
+            PROMPT_MODE,
+            |runner| {
+                openclaw_config_set_json(runner, "env", &serde_json::json!({"k":"v"}), PROMPT_MODE)
+            },
+        );
 
         let error = result.unwrap_err().to_string();
         assert!(error.contains("test operation"));
@@ -969,9 +1058,14 @@ mod tests {
             .responses
             .push_back(failed_output(3, "restore failed"));
 
-        let result = with_gateway_reload_mode_disabled(&mut runner, "test operation", |runner| {
-            openclaw_config_set_json(runner, "env", &serde_json::json!({"k":"v"}))
-        });
+        let result = with_gateway_reload_mode_disabled(
+            &mut runner,
+            "test operation",
+            PROMPT_MODE,
+            |runner| {
+                openclaw_config_set_json(runner, "env", &serde_json::json!({"k":"v"}), PROMPT_MODE)
+            },
+        );
 
         let error = result.unwrap_err().to_string();
         assert!(error.contains("test operation"));
@@ -987,10 +1081,15 @@ mod tests {
             .push_back(failed_output(2, "disable failed"));
         let operation_called = Cell::new(false);
 
-        let result = with_gateway_reload_mode_disabled(&mut runner, "test operation", |_runner| {
-            operation_called.set(true);
-            Ok(())
-        });
+        let result = with_gateway_reload_mode_disabled(
+            &mut runner,
+            "test operation",
+            PROMPT_MODE,
+            |_runner| {
+                operation_called.set(true);
+                Ok(())
+            },
+        );
 
         let error = result.unwrap_err().to_string();
         assert!(error.contains("disable failed"));
