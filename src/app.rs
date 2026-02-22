@@ -1,17 +1,18 @@
-use crate::config::{Config, Provider};
+use crate::config::{Config, KeyAuthMethod, Provider};
 use crate::dlp::DlpScanner;
 use crate::email::{
     EmailAccountCredentials, EmailGetMessageRequest, EmailListMessagesRequest, EmailMessageContent,
     EmailMessageMetadata, EmailPolicy, EmailService, EmailServiceError, ImapEmailService,
     normalize_sender_rule,
 };
-use crate::keys::{KeyManager, ResolvedKey};
+use crate::keys::{KeyManager, KeySource, ResolvedKey};
+use crate::oauth::OAuthRegistry;
 use crate::proxy::ProxyClient;
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use bytes::Bytes;
@@ -27,6 +28,7 @@ pub struct AppState {
     pub key_manager: Arc<KeyManager>,
     pub dlp_scanner: Arc<DlpScanner>,
     pub proxy_client: Arc<ProxyClient>,
+    pub oauth_registry: Arc<OAuthRegistry>,
     pub email_enabled: bool,
     pub email_policy: Option<EmailPolicy>,
     pub email_accounts: Arc<BTreeMap<String, EmailAccountCredentials>>,
@@ -34,7 +36,15 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[allow(dead_code)]
     pub fn from_config(config: &Config) -> Result<Self, String> {
+        Self::from_config_with_registry(config, None)
+    }
+
+    pub fn from_config_with_registry(
+        config: &Config,
+        oauth_registry: Option<OAuthRegistry>,
+    ) -> Result<Self, String> {
         let mut upstream_urls = BTreeMap::new();
         upstream_urls.insert(Provider::Openai, config.upstream_url(Provider::Openai));
         upstream_urls.insert(
@@ -46,19 +56,29 @@ impl AppState {
             config.upstream_url(Provider::Anthropic),
         );
 
-        let key_mappings = config
-            .key_map()
-            .iter()
-            .map(|(virtual_key, (real_key, provider))| {
-                (
-                    virtual_key.clone(),
-                    ResolvedKey {
-                        real_key: real_key.clone(),
-                        provider: *provider,
-                    },
-                )
-            })
-            .collect();
+        // Build key mappings for both static and OAuth keys
+        let mut key_mappings: BTreeMap<String, ResolvedKey> = BTreeMap::new();
+
+        for key in &config.keys {
+            let source = match key.auth {
+                KeyAuthMethod::Static => KeySource::Static {
+                    real_key: key.real_key.clone().unwrap_or_default(),
+                },
+                KeyAuthMethod::OAuth => KeySource::OAuth {
+                    provider_id: key.oauth_provider.clone().unwrap_or_default(),
+                },
+            };
+            key_mappings.insert(
+                key.virtual_key.clone(),
+                ResolvedKey {
+                    source,
+                    provider: key.provider,
+                },
+            );
+        }
+
+        let oauth_registry =
+            oauth_registry.unwrap_or_else(|| OAuthRegistry::new(Default::default()));
 
         let email_policy = if config.email.enabled {
             config.email.mode.map(|mode| {
@@ -111,6 +131,7 @@ impl AppState {
                 upstream_urls,
                 config.upstream.anthropic_version.clone(),
             )),
+            oauth_registry: Arc::new(oauth_registry),
             email_enabled: config.email.enabled,
             email_policy,
             email_accounts: Arc::new(email_accounts),
@@ -459,7 +480,7 @@ async fn handle_request(
         );
         error_response(StatusCode::UNAUTHORIZED, "Unknown API key")
     })?;
-    let real_key = resolved.real_key.clone();
+    let source = resolved.source.clone();
     let provider = resolved.provider;
 
     debug!(
@@ -529,27 +550,54 @@ async fn handle_request(
         "Forwarding request to upstream"
     );
 
-    let response = state
-        .proxy_client
-        .forward(
-            method.clone(),
-            &uri,
-            headers,
-            &real_key,
-            body_bytes,
-            provider,
-        )
-        .await
-        .map_err(|e| {
-            error!(
-                method = %method,
-                path = %path,
-                virtual_key = %virtual_key,
-                error = %e,
-                "Proxy error"
-            );
-            e.into_response()
-        })?;
+    let response = match source {
+        KeySource::Static { real_key } => {
+            state
+                .proxy_client
+                .forward(
+                    method.clone(),
+                    &uri,
+                    headers,
+                    &real_key,
+                    body_bytes,
+                    provider,
+                )
+                .await
+                .map_err(|e| {
+                    error!(
+                        method = %method,
+                        path = %path,
+                        virtual_key = %virtual_key,
+                        error = %e,
+                        "Proxy error"
+                    );
+                    e.into_response()
+                })?
+        }
+        KeySource::OAuth { provider_id } => {
+            forward_oauth_request(
+                &state,
+                method.clone(),
+                &uri,
+                headers,
+                body_bytes,
+                provider,
+                &provider_id,
+            )
+            .await
+            .map_err(|e| {
+                error!(
+                    method = %method,
+                    path = %path,
+                    virtual_key = %virtual_key,
+                    oauth_provider = %provider_id,
+                    error = %e,
+                    "OAuth proxy error"
+                );
+                error_response(StatusCode::BAD_GATEWAY, &format!("OAuth proxy error: {e}"))
+            })?
+        }
+    };
 
     // 5. DLP scan on response body (redact all PII before returning to client)
     let response = if state.dlp_scanner.scan_responses() {
@@ -616,6 +664,110 @@ async fn handle_request(
         latency_ms = latency.as_millis(),
         "Request completed"
     );
+
+    Ok(response)
+}
+
+async fn forward_oauth_request(
+    state: &AppState,
+    method: Method,
+    uri: &Uri,
+    headers: HeaderMap,
+    body_bytes: Bytes,
+    provider: Provider,
+    oauth_provider_id: &str,
+) -> Result<Response, String> {
+    // 1. Inject auth headers
+    let mut auth_headers = HeaderMap::new();
+    state
+        .oauth_registry
+        .inject_auth(oauth_provider_id, &mut auth_headers)
+        .await
+        .map_err(|e| format!("OAuth auth injection failed: {e}"))?;
+
+    // 2. Optionally transform the body
+    let body = match state
+        .oauth_registry
+        .prepare_request_body(oauth_provider_id, &body_bytes)
+        .await
+        .map_err(|e| format!("OAuth body preparation failed: {e}"))?
+    {
+        Some(transformed) => Bytes::from(transformed),
+        None => body_bytes.clone(),
+    };
+
+    // 3. Optionally get upstream URL override
+    let upstream_url = state
+        .oauth_registry
+        .upstream_url(oauth_provider_id)
+        .await
+        .map_err(|e| format!("OAuth upstream URL resolution failed: {e}"))?;
+
+    // 4. Forward the request
+    let response = state
+        .proxy_client
+        .forward_oauth(
+            method.clone(),
+            uri,
+            headers.clone(),
+            body.clone(),
+            provider,
+            auth_headers.clone(),
+            upstream_url.as_deref(),
+        )
+        .await
+        .map_err(|e| format!("OAuth forward failed: {e}"))?;
+
+    // 5. If we got a 401, refresh the token and retry once
+    if response.status() == StatusCode::UNAUTHORIZED {
+        info!(
+            oauth_provider = %oauth_provider_id,
+            "Got 401 from upstream, attempting token refresh and retry"
+        );
+        if let Err(e) = state.oauth_registry.refresh(oauth_provider_id).await {
+            warn!(
+                oauth_provider = %oauth_provider_id,
+                error = %e,
+                "Token refresh failed after 401"
+            );
+            return Ok(response);
+        }
+
+        // Re-inject auth with refreshed token
+        let mut retry_auth_headers = HeaderMap::new();
+        state
+            .oauth_registry
+            .inject_auth(oauth_provider_id, &mut retry_auth_headers)
+            .await
+            .map_err(|e| format!("OAuth retry auth injection failed: {e}"))?;
+
+        // Optionally re-transform the body (tokens may have changed affecting body)
+        let retry_body = match state
+            .oauth_registry
+            .prepare_request_body(oauth_provider_id, &body_bytes)
+            .await
+            .map_err(|e| format!("OAuth retry body preparation failed: {e}"))?
+        {
+            Some(transformed) => Bytes::from(transformed),
+            None => body_bytes,
+        };
+
+        let retry_response = state
+            .proxy_client
+            .forward_oauth(
+                method,
+                uri,
+                headers,
+                retry_body,
+                provider,
+                retry_auth_headers,
+                upstream_url.as_deref(),
+            )
+            .await
+            .map_err(|e| format!("OAuth retry forward failed: {e}"))?;
+
+        return Ok(retry_response);
+    }
 
     Ok(response)
 }

@@ -37,6 +37,8 @@ pub struct Config {
     pub email: EmailConfig,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oauth_providers: Vec<crate::oauth::OAuthProviderConfig>,
 }
 
 fn default_log_level() -> String {
@@ -81,13 +83,33 @@ fn default_openai_base_url() -> String {
     "https://api.openai.com".to_string()
 }
 
+/// How a key mapping authenticates: static API key or OAuth provider.
+#[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyAuthMethod {
+    /// Static API key (the default, existing behavior).
+    #[default]
+    Static,
+    /// OAuth provider supplies the access token at runtime.
+    OAuth,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct KeyMapping {
     pub virtual_key: String,
-    pub real_key: String,
+    /// Required when auth = "static" (or omitted). Optional when auth = "oauth".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub real_key: Option<String>,
     #[serde(default)]
     pub provider: Provider,
+    /// Authentication method for this key. Defaults to "static".
+    #[serde(default)]
+    pub auth: KeyAuthMethod,
+    /// Which OAuth provider supplies the token (e.g. "codex", "antigravity").
+    /// Required when auth = "oauth".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_provider: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -220,7 +242,47 @@ impl Config {
             Regex::new(&pattern.regex)
                 .map_err(|e| format!("Invalid DLP regex for '{}': {}", pattern.name, e))?;
         }
+        self.validate_keys()?;
         self.validate_email()?;
+        Ok(())
+    }
+
+    fn validate_keys(&self) -> Result<(), Box<dyn std::error::Error>> {
+        for key in &self.keys {
+            match key.auth {
+                KeyAuthMethod::Static => {
+                    if key.real_key.is_none() {
+                        return Err(format!(
+                            "key '{}': real_key is required when auth = \"static\"",
+                            key.virtual_key
+                        )
+                        .into());
+                    }
+                }
+                KeyAuthMethod::OAuth => {
+                    if key.oauth_provider.as_ref().is_none_or(|p| p.trim().is_empty()) {
+                        return Err(format!(
+                            "key '{}': oauth_provider is required when auth = \"oauth\"",
+                            key.virtual_key
+                        )
+                        .into());
+                    }
+                    // Verify the referenced OAuth provider exists in config
+                    let provider_id = key.oauth_provider.as_ref().unwrap();
+                    if !self
+                        .oauth_providers
+                        .iter()
+                        .any(|p| p.provider == *provider_id)
+                    {
+                        return Err(format!(
+                            "key '{}': oauth_provider '{}' not found in [[oauth_providers]]",
+                            key.virtual_key, provider_id
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -315,10 +377,32 @@ impl Config {
         Ok(())
     }
 
+    /// Returns a map of static key mappings: virtual_key → (real_key, provider).
+    /// OAuth-backed keys are excluded.
+    #[allow(dead_code)]
     pub fn key_map(&self) -> BTreeMap<String, (String, Provider)> {
         self.keys
             .iter()
-            .map(|k| (k.virtual_key.clone(), (k.real_key.clone(), k.provider)))
+            .filter(|k| k.auth == KeyAuthMethod::Static)
+            .filter_map(|k| {
+                k.real_key
+                    .clone()
+                    .map(|rk| (k.virtual_key.clone(), (rk, k.provider)))
+            })
+            .collect()
+    }
+
+    /// Returns a map of OAuth key mappings: virtual_key → (oauth_provider_id, provider).
+    #[allow(dead_code)]
+    pub fn oauth_key_map(&self) -> BTreeMap<String, (String, Provider)> {
+        self.keys
+            .iter()
+            .filter(|k| k.auth == KeyAuthMethod::OAuth)
+            .filter_map(|k| {
+                k.oauth_provider
+                    .clone()
+                    .map(|op| (k.virtual_key.clone(), (op, k.provider)))
+            })
             .collect()
     }
 

@@ -2,6 +2,8 @@
 /clawshell.toml
 /tarpaulin-report.json
 /tarpaulin-report.html
+.env
+.idea/
 
 # npm platform binaries (added during release, not checked in)
 npm/clawshell-*/bin/clawshell

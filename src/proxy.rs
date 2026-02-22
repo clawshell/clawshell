@@ -62,22 +62,7 @@ impl ProxyClient {
             "Preparing upstream request"
         );
 
-        let mut req_headers = HeaderMap::new();
-        for (name, value) in &headers {
-            let name_str = name.as_str().to_lowercase();
-            // Skip hop-by-hop headers and the original auth header
-            if name_str == "host"
-                || name_str == "authorization"
-                || name_str == "connection"
-                || name_str == "content-length"
-                || name_str == "transfer-encoding"
-                || name_str == "x-api-key"
-            {
-                trace!(header = %name_str, "Skipping hop-by-hop/auth header");
-                continue;
-            }
-            req_headers.insert(name.clone(), value.clone());
-        }
+        let mut req_headers = filter_hop_by_hop_headers(&headers);
 
         trace!(
             forwarded_header_count = req_headers.len(),
@@ -107,6 +92,74 @@ impl ProxyClient {
             }
         }
 
+        self.send_upstream(method, &upstream_url, req_headers, body)
+            .await
+    }
+
+    /// Forward a request using OAuth-injected auth headers and optional overrides.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn forward_oauth(
+        &self,
+        method: Method,
+        uri: &Uri,
+        original_headers: HeaderMap,
+        body: Bytes,
+        provider: Provider,
+        auth_headers: HeaderMap,
+        upstream_url_override: Option<&str>,
+    ) -> Result<Response, ProxyError> {
+        let upstream_url = if let Some(base) = upstream_url_override {
+            format!(
+                "{}{}",
+                base,
+                uri.path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or(uri.path())
+            )
+        } else {
+            let base_url = self.upstream_urls.get(&provider).ok_or_else(|| {
+                ProxyError::Internal(format!("No upstream URL for provider {:?}", provider))
+            })?;
+            format!(
+                "{}{}",
+                base_url,
+                uri.path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or(uri.path())
+            )
+        };
+
+        debug!(
+            %upstream_url,
+            %method,
+            provider = ?provider,
+            body_size = body.len(),
+            "Preparing OAuth upstream request"
+        );
+
+        let mut req_headers = filter_hop_by_hop_headers(&original_headers);
+
+        // Apply OAuth auth headers (these may include Authorization, x-goog-api-client, etc.)
+        for (name, value) in &auth_headers {
+            req_headers.insert(name.clone(), value.clone());
+        }
+
+        trace!(
+            forwarded_header_count = req_headers.len(),
+            "Filtered request headers (OAuth)"
+        );
+
+        self.send_upstream(method, &upstream_url, req_headers, body)
+            .await
+    }
+
+    async fn send_upstream(
+        &self,
+        method: Method,
+        upstream_url: &str,
+        req_headers: HeaderMap,
+        body: Bytes,
+    ) -> Result<Response, ProxyError> {
         let reqwest_method = match method {
             Method::GET => reqwest::Method::GET,
             Method::POST => reqwest::Method::POST,
@@ -124,7 +177,7 @@ impl ProxyClient {
 
         let upstream_resp = self
             .client
-            .request(reqwest_method, &upstream_url)
+            .request(reqwest_method, upstream_url)
             .headers(req_headers)
             .body(body)
             .send()
@@ -137,7 +190,6 @@ impl ProxyClient {
 
         debug!(
             upstream_status = %status,
-            provider = ?provider,
             "Received upstream response"
         );
 
@@ -164,15 +216,9 @@ impl ProxyClient {
             let byte_stream = upstream_resp.bytes_stream().map_err(IoError::other);
             let body = Body::from_stream(byte_stream);
 
-            // Rebind the `status` var to clarify the type for human developer:
-            // it is guaranteed to be `StatusCode` due to the `.unwrap_or` in its assignment above.
             let status: StatusCode = status;
             let mut response = Response::builder().status(status);
-            // INVARIANT: the `status` variable is guaranteed to be `StatusCode`,
-            // so this `.unwrap` should never panic.
             *response.headers_mut().unwrap() = resp_headers;
-            // INVARIANT: the builder should always succeed since we just added a valid status code and headers,
-            // so this `.unwrap` should never panic.
             Ok(response.body(body).unwrap())
         } else {
             // Buffer the full response
@@ -186,16 +232,32 @@ impl ProxyClient {
                 "Buffered upstream response body"
             );
 
-            // Rebind the `status` var to clarify the type for human developer:
-            // it is guaranteed to be `StatusCode` due to the `.unwrap_or` in its assignment above.
             let status: StatusCode = status;
             let mut response = Response::builder().status(status);
-            // INVARIANT: the builder should always succeed since we just added a valid status code and headers,
-            // so this `.unwrap` should never panic.
             *response.headers_mut().unwrap() = resp_headers;
             Ok(response.body(Body::from(resp_body)).unwrap())
         }
     }
+}
+
+fn filter_hop_by_hop_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut filtered = HeaderMap::new();
+    for (name, value) in headers {
+        let name_str = name.as_str().to_lowercase();
+        // Skip hop-by-hop headers and the original auth header
+        if name_str == "host"
+            || name_str == "authorization"
+            || name_str == "connection"
+            || name_str == "content-length"
+            || name_str == "transfer-encoding"
+            || name_str == "x-api-key"
+        {
+            trace!(header = %name_str, "Skipping hop-by-hop/auth header");
+            continue;
+        }
+        filtered.insert(name.clone(), value.clone());
+    }
+    filtered
 }
 
 #[derive(Debug)]
@@ -307,5 +369,20 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["error"].as_str().unwrap().contains("TRACE"));
+    }
+
+    #[test]
+    fn test_filter_hop_by_hop_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer vk-test".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+        headers.insert("host", "localhost".parse().unwrap());
+        headers.insert("x-custom", "custom-value".parse().unwrap());
+
+        let filtered = filter_hop_by_hop_headers(&headers);
+        assert!(filtered.get("authorization").is_none());
+        assert!(filtered.get("host").is_none());
+        assert!(filtered.get("content-type").is_some());
+        assert!(filtered.get("x-custom").is_some());
     }
 }

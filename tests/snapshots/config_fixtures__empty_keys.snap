@@ -13,6 +13,7 @@ keys:
   - virtual_key: ""
     real_key: ""
     provider: openai
+    auth: static
 dlp:
   patterns: []
   scan_responses: true
