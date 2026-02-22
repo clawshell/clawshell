@@ -696,6 +696,36 @@ async fn forward_oauth_request(
         None => body_bytes.clone(),
     };
 
+    // 2b. Check if path needs rewriting (e.g., /v1/chat/completions → /v1/responses)
+    let original_path = uri.path().to_string();
+    let rewritten_path = state
+        .oauth_registry
+        .rewrite_request_path(oauth_provider_id, &original_path)
+        .map_err(|e| format!("OAuth path rewrite failed: {e}"))?;
+    let needs_translation = state
+        .oauth_registry
+        .needs_response_translation(oauth_provider_id, &original_path)
+        .map_err(|e| format!("OAuth translation check failed: {e}"))?;
+    let stream_requested = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+        .ok()
+        .and_then(|v| v.get("stream")?.as_bool())
+        .unwrap_or(false);
+
+    let effective_uri = if let Some(ref new_path) = rewritten_path {
+        build_rewritten_uri(uri, new_path)?
+    } else {
+        uri.clone()
+    };
+
+    if rewritten_path.is_some() {
+        debug!(
+            oauth_provider = %oauth_provider_id,
+            original_path = %original_path,
+            effective_path = %effective_uri.path(),
+            "Rewrote request path for OAuth provider"
+        );
+    }
+
     // 3. Optionally get upstream URL override
     let upstream_url = state
         .oauth_registry
@@ -708,7 +738,7 @@ async fn forward_oauth_request(
         .proxy_client
         .forward_oauth(
             method.clone(),
-            uri,
+            &effective_uri,
             headers.clone(),
             body.clone(),
             provider,
@@ -722,6 +752,7 @@ async fn forward_oauth_request(
     if response.status() == StatusCode::UNAUTHORIZED {
         info!(
             oauth_provider = %oauth_provider_id,
+            effective_path = %effective_uri.path(),
             "Got 401 from upstream, attempting token refresh and retry"
         );
         if let Err(e) = state.oauth_registry.refresh(oauth_provider_id).await {
@@ -730,7 +761,7 @@ async fn forward_oauth_request(
                 error = %e,
                 "Token refresh failed after 401"
             );
-            return Ok(response);
+            return maybe_translate_response(response, needs_translation, stream_requested).await;
         }
 
         // Re-inject auth with refreshed token
@@ -756,7 +787,7 @@ async fn forward_oauth_request(
             .proxy_client
             .forward_oauth(
                 method,
-                uri,
+                &effective_uri,
                 headers,
                 retry_body,
                 provider,
@@ -766,10 +797,101 @@ async fn forward_oauth_request(
             .await
             .map_err(|e| format!("OAuth retry forward failed: {e}"))?;
 
-        return Ok(retry_response);
+        if retry_response.status() == StatusCode::UNAUTHORIZED {
+            warn!(
+                oauth_provider = %oauth_provider_id,
+                effective_path = %effective_uri.path(),
+                "Retry after token refresh still returned 401"
+            );
+        }
+
+        return maybe_translate_response(retry_response, needs_translation, stream_requested).await;
     }
 
-    Ok(response)
+    // Log error response bodies for debugging upstream issues
+    if response.status().is_client_error() || response.status().is_server_error() {
+        let status = response.status();
+        let (parts, body) = response.into_parts();
+        let body_bytes_resp = body
+            .collect()
+            .await
+            .map(|b| b.to_bytes())
+            .unwrap_or_default();
+        if let Ok(body_str) = std::str::from_utf8(&body_bytes_resp) {
+            warn!(
+                oauth_provider = %oauth_provider_id,
+                effective_path = %effective_uri.path(),
+                status = %status,
+                response_body = %body_str,
+                "Upstream returned error"
+            );
+        }
+        let response = Response::from_parts(parts, Body::from(body_bytes_resp));
+        return maybe_translate_response(response, needs_translation, stream_requested).await;
+    }
+
+    maybe_translate_response(response, needs_translation, stream_requested).await
+}
+
+/// Optionally translate a Responses API response back to chat/completions format.
+async fn maybe_translate_response(
+    response: Response,
+    needs_translation: bool,
+    stream_requested: bool,
+) -> Result<Response, String> {
+    if !needs_translation {
+        return Ok(response);
+    }
+
+    let is_streaming = stream_requested
+        || response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/event-stream"));
+
+    if is_streaming {
+        let (parts, body) = response.into_parts();
+        let translated_body = crate::translate::wrap_body_with_translate_stream(body);
+        return Ok(Response::from_parts(parts, translated_body));
+    }
+
+    // Non-streaming: only translate successful responses
+    let status = response.status();
+    if !status.is_success() {
+        return Ok(response);
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let body_bytes = body
+        .collect()
+        .await
+        .map_err(|e| format!("failed to read response body for translation: {e}"))?
+        .to_bytes();
+
+    match crate::translate::responses_to_chat_completion(&body_bytes) {
+        Ok(translated) => {
+            parts.headers.remove("content-length");
+            Ok(Response::from_parts(parts, Body::from(translated)))
+        }
+        Err(e) => {
+            warn!(error = %e, "Response translation failed, returning original");
+            Ok(Response::from_parts(parts, Body::from(body_bytes)))
+        }
+    }
+}
+
+/// Build a new URI with a rewritten path, preserving query string.
+/// Incoming axum URIs are path-only (no scheme/authority), so we build path-only too.
+fn build_rewritten_uri(original: &Uri, new_path: &str) -> Result<Uri, String> {
+    let path_and_query = if let Some(query) = original.query() {
+        format!("{new_path}?{query}")
+    } else {
+        new_path.to_string()
+    };
+    path_and_query
+        .parse::<Uri>()
+        .map_err(|e| format!("failed to build rewritten URI: {e}"))
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {

@@ -373,7 +373,48 @@ impl OAuthProvider for CodexProvider {
             AUTHORIZATION,
             format!("Bearer {access_token}").parse()?,
         );
+        // ChatGPT backend requires Accept header for SSE streaming
+        headers.insert(
+            axum::http::header::ACCEPT,
+            "text/event-stream".parse().unwrap(),
+        );
         Ok(())
+    }
+
+    fn prepare_request_body(
+        &self,
+        body: &[u8],
+        _tokens: &OAuthTokens,
+    ) -> Result<Option<Vec<u8>>, OAuthError> {
+        // Only translate if the body is JSON with a "messages" field
+        let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return Ok(None);
+        };
+        if parsed.get("messages").is_none() {
+            return Ok(None);
+        }
+        match crate::translate::chat_completions_to_responses(body) {
+            Ok(translated) => Ok(Some(fixup_for_chatgpt_backend(&translated))),
+            Err(e) => Err(OAuthError::LoginFailed(format!(
+                "request translation failed: {e}"
+            ))),
+        }
+    }
+
+    fn upstream_url(&self, _tokens: &OAuthTokens) -> Option<String> {
+        Some("https://chatgpt.com/backend-api/codex".to_string())
+    }
+
+    fn rewrite_request_path(&self, path: &str) -> Option<String> {
+        if path == "/v1/chat/completions" {
+            Some("/responses".to_string())
+        } else {
+            None
+        }
+    }
+
+    fn needs_response_translation(&self, original_path: &str) -> bool {
+        original_path == "/v1/chat/completions"
     }
 }
 
@@ -422,6 +463,22 @@ async fn wait_for_oauth_callback(
     }
 
     Ok((code, state))
+}
+
+/// Apply ChatGPT backend-specific fixups to the translated request body:
+/// - Strip provider prefix from model (e.g. "openai/gpt-5.2-codex" → "gpt-5.2-codex")
+/// - Set `store: false` (required by ChatGPT backend)
+fn fixup_for_chatgpt_backend(body: &[u8]) -> Vec<u8> {
+    let Ok(mut parsed) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return body.to_vec();
+    };
+    if let Some(model) = parsed.get("model").and_then(|v| v.as_str()) {
+        if let Some(stripped) = model.strip_prefix("openai/") {
+            parsed["model"] = serde_json::Value::String(stripped.to_string());
+        }
+    }
+    parsed["store"] = serde_json::Value::Bool(false);
+    serde_json::to_vec(&parsed).unwrap_or_else(|_| body.to_vec())
 }
 
 #[cfg(test)]
@@ -520,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_request_body_passthrough() {
+    fn test_prepare_request_body_translates_chat() {
         let provider = CodexProvider::new(None, None, None, None);
         let tokens = OAuthTokens {
             access_token: "t".to_string(),
@@ -530,12 +587,21 @@ mod tests {
             account_id: None,
             extra: BTreeMap::new(),
         };
-        let result = provider.prepare_request_body(b"test body", &tokens).unwrap();
-        assert!(result.is_none()); // pass-through
+        let body = serde_json::json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let result = provider
+            .prepare_request_body(body.to_string().as_bytes(), &tokens)
+            .unwrap();
+        assert!(result.is_some());
+        let parsed: serde_json::Value = serde_json::from_slice(&result.unwrap()).unwrap();
+        assert!(parsed.get("input").is_some());
+        assert!(parsed.get("messages").is_none());
     }
 
     #[test]
-    fn test_upstream_url_none() {
+    fn test_prepare_request_body_passthrough_non_chat() {
         let provider = CodexProvider::new(None, None, None, None);
         let tokens = OAuthTokens {
             access_token: "t".to_string(),
@@ -545,6 +611,90 @@ mod tests {
             account_id: None,
             extra: BTreeMap::new(),
         };
-        assert!(provider.upstream_url(&tokens).is_none());
+        // No "messages" field → passthrough
+        let body = serde_json::json!({"model": "gpt-4o", "input": "hello"});
+        let result = provider
+            .prepare_request_body(body.to_string().as_bytes(), &tokens)
+            .unwrap();
+        assert!(result.is_none());
+
+        // Non-JSON → passthrough
+        let result = provider
+            .prepare_request_body(b"not json", &tokens)
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_rewrite_path_chat_completions() {
+        let provider = CodexProvider::new(None, None, None, None);
+        assert_eq!(
+            provider.rewrite_request_path("/v1/chat/completions"),
+            Some("/responses".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_path_other() {
+        let provider = CodexProvider::new(None, None, None, None);
+        assert_eq!(provider.rewrite_request_path("/v1/models"), None);
+        assert_eq!(provider.rewrite_request_path("/v1/responses"), None);
+        assert_eq!(provider.rewrite_request_path("/responses"), None);
+    }
+
+    #[test]
+    fn test_needs_translation_chat_completions() {
+        let provider = CodexProvider::new(None, None, None, None);
+        assert!(provider.needs_response_translation("/v1/chat/completions"));
+    }
+
+    #[test]
+    fn test_needs_translation_other() {
+        let provider = CodexProvider::new(None, None, None, None);
+        assert!(!provider.needs_response_translation("/v1/models"));
+        assert!(!provider.needs_response_translation("/v1/responses"));
+    }
+
+    #[test]
+    fn test_upstream_url_chatgpt() {
+        let provider = CodexProvider::new(None, None, None, None);
+        let tokens = OAuthTokens {
+            access_token: "t".to_string(),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            account_id: None,
+            extra: BTreeMap::new(),
+        };
+        assert_eq!(
+            provider.upstream_url(&tokens),
+            Some("https://chatgpt.com/backend-api/codex".to_string())
+        );
+    }
+
+    #[test]
+    fn test_fixup_strips_model_prefix() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "openai/gpt-5.2-codex",
+            "input": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let result = fixup_for_chatgpt_backend(&body);
+        let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(parsed["model"], "gpt-5.2-codex");
+        assert_eq!(parsed["store"], false);
+    }
+
+    #[test]
+    fn test_fixup_sets_store_false() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "gpt-4o-mini",
+            "input": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let result = fixup_for_chatgpt_backend(&body);
+        let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(parsed["model"], "gpt-4o-mini");
+        assert_eq!(parsed["store"], false);
     }
 }

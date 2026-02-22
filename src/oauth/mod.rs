@@ -129,6 +129,25 @@ pub trait OAuthProvider: Send + Sync + fmt::Debug {
     fn supports_headless_url(&self) -> bool {
         false
     }
+
+    /// Enrich tokens with provider-specific state if missing (e.g., project ID discovery).
+    /// Returns `Some(enriched)` if tokens were updated, `None` if no changes needed.
+    /// Called before `prepare_request_body` to ensure tokens are ready for use.
+    async fn enrich_tokens(&self, _tokens: &OAuthTokens) -> Result<Option<OAuthTokens>, OAuthError> {
+        Ok(None)
+    }
+
+    /// Optionally rewrite the request path (e.g., `/v1/chat/completions` → `/v1/responses`).
+    /// Returns `None` to use the original path unchanged.
+    fn rewrite_request_path(&self, _path: &str) -> Option<String> {
+        None
+    }
+
+    /// Whether responses from the upstream need to be translated back
+    /// to match the original request format.
+    fn needs_response_translation(&self, _original_path: &str) -> bool {
+        false
+    }
 }
 
 /// Configuration for an OAuth provider from TOML.
@@ -230,6 +249,7 @@ impl OAuthRegistry {
     }
 
     /// Prepare the request body for the given provider.
+    /// Calls `enrich_tokens` first to ensure provider-specific state is populated.
     pub async fn prepare_request_body(
         &self,
         provider_id: &str,
@@ -239,6 +259,26 @@ impl OAuthRegistry {
             .providers
             .get(provider_id)
             .ok_or_else(|| OAuthError::ProviderNotFound(provider_id.to_string()))?;
+
+        // Enrich tokens on-demand if the provider needs it (e.g., project_id discovery)
+        {
+            let tokens = self.tokens.read().await;
+            let t = tokens
+                .get(provider_id)
+                .ok_or_else(|| OAuthError::NoTokens(provider_id.to_string()))?;
+            if let Some(enriched) = provider.enrich_tokens(t).await? {
+                drop(tokens);
+                info!(provider = %provider_id, "Enriched OAuth tokens with provider-specific state");
+                if let Err(e) = self.storage.save(provider_id, &enriched) {
+                    warn!(provider = %provider_id, error = %e, "Failed to persist enriched tokens");
+                }
+                self.tokens
+                    .write()
+                    .await
+                    .insert(provider_id.to_string(), enriched);
+            }
+        }
+
         let tokens = self.tokens.read().await;
         let t = tokens
             .get(provider_id)
@@ -371,6 +411,30 @@ impl OAuthRegistry {
                 }
             });
         }
+    }
+
+    pub fn rewrite_request_path(
+        &self,
+        provider_id: &str,
+        path: &str,
+    ) -> Result<Option<String>, OAuthError> {
+        let provider = self
+            .providers
+            .get(provider_id)
+            .ok_or_else(|| OAuthError::ProviderNotFound(provider_id.to_string()))?;
+        Ok(provider.rewrite_request_path(path))
+    }
+
+    pub fn needs_response_translation(
+        &self,
+        provider_id: &str,
+        original_path: &str,
+    ) -> Result<bool, OAuthError> {
+        let provider = self
+            .providers
+            .get(provider_id)
+            .ok_or_else(|| OAuthError::ProviderNotFound(provider_id.to_string()))?;
+        Ok(provider.needs_response_translation(original_path))
     }
 
     pub fn has_provider(&self, id: &str) -> bool {

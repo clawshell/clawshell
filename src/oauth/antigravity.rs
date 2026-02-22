@@ -167,6 +167,13 @@ impl AntigravityProvider {
         if tokens.refresh_token.is_none() {
             tokens.refresh_token = Some(refresh_token.to_string());
         }
+
+        // Re-discover project ID with the fresh access token.
+        // This also recovers from initial login discovery failures.
+        if let Err(e) = self.discover_project_id(&mut tokens).await {
+            warn!(error = %e, "Failed to discover Antigravity project ID during refresh");
+        }
+
         Ok(tokens)
     }
 
@@ -379,6 +386,16 @@ impl OAuthProvider for AntigravityProvider {
             r#"{"ideType":"ANTIGRAVITY","platform":"LINUX","pluginType":"GEMINI"}"#.parse()?,
         );
         Ok(())
+    }
+
+    async fn enrich_tokens(&self, tokens: &OAuthTokens) -> Result<Option<OAuthTokens>, OAuthError> {
+        if tokens.extra.contains_key("project_id") {
+            return Ok(None);
+        }
+        info!("Antigravity tokens missing project_id, discovering on-demand");
+        let mut enriched = tokens.clone();
+        self.discover_project_id(&mut enriched).await?;
+        Ok(Some(enriched))
     }
 
     fn prepare_request_body(

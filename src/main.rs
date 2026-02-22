@@ -16,6 +16,7 @@ mod openclaw_cli;
 mod platform;
 mod process;
 mod proxy;
+mod translate;
 mod tui;
 
 use clap::Parser;
