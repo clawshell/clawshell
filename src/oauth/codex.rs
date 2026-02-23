@@ -476,6 +476,7 @@ async fn wait_for_oauth_callback(
 /// Apply ChatGPT backend-specific fixups to the translated request body:
 /// - Strip provider prefix from model (e.g. "openai/gpt-5.2-codex" → "gpt-5.2-codex")
 /// - Set `store: false` (required by ChatGPT backend)
+/// - Set `stream: true` (required by ChatGPT backend)
 fn fixup_for_chatgpt_backend(body: &[u8]) -> Vec<u8> {
     let Ok(mut parsed) = serde_json::from_slice::<serde_json::Value>(body) else {
         return body.to_vec();
@@ -486,6 +487,11 @@ fn fixup_for_chatgpt_backend(body: &[u8]) -> Vec<u8> {
         }
     }
     parsed["store"] = serde_json::Value::Bool(false);
+    parsed["stream"] = serde_json::Value::Bool(true);
+    // Codex backend does not support max_output_tokens
+    if let Some(obj) = parsed.as_object_mut() {
+        obj.remove("max_output_tokens");
+    }
     serde_json::to_vec(&parsed).unwrap_or_else(|_| body.to_vec())
 }
 

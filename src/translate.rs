@@ -1,10 +1,12 @@
+use crate::dlp::DlpScanner;
 use axum::body::Body;
 use bytes::{Bytes, BytesMut};
 use futures_util::Stream;
 use serde_json::Value;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
-use tracing::debug;
+use tracing::{debug, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TranslateError {
@@ -59,9 +61,11 @@ pub fn chat_completions_to_responses(body: &[u8]) -> Result<Vec<u8>, TranslateEr
         }
     }
 
-    if !system_parts.is_empty() {
-        result.insert("instructions".to_string(), Value::String(system_parts.join("\n")));
-    }
+    // Codex responses API requires `instructions` even when empty
+    result.insert(
+        "instructions".to_string(),
+        Value::String(system_parts.join("\n")),
+    );
     result.insert("input".to_string(), Value::Array(input));
 
     // Rename max_tokens → max_output_tokens
@@ -85,10 +89,14 @@ pub fn chat_completions_to_responses(body: &[u8]) -> Result<Vec<u8>, TranslateEr
 
 /// Convert a chat/completions message to a Responses API input item.
 /// - Adds `type: "message"` (required by Responses API)
-/// - Converts content `type: "text"` → `type: "input_text"`
+/// - For user messages: converts content `type: "text"` → `type: "input_text"`
+/// - For assistant messages: converts content `type: "text"` → `type: "output_text"`
 /// - Converts content `type: "image_url"` → `type: "input_image"`
 /// - String content is left as-is (the Responses API accepts string content directly).
 fn convert_message_content(mut msg: Value) -> Value {
+    let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
+    let is_assistant = role == "assistant";
+
     // Responses API requires "type": "message" on each input item
     if let Some(obj) = msg.as_object_mut() {
         if !obj.contains_key("type") {
@@ -109,7 +117,8 @@ fn convert_message_content(mut msg: Value) -> Value {
         };
         match obj.get("type").and_then(Value::as_str) {
             Some("text") => {
-                obj.insert("type".to_string(), Value::String("input_text".to_string()));
+                let text_type = if is_assistant { "output_text" } else { "input_text" };
+                obj.insert("type".to_string(), Value::String(text_type.to_string()));
             }
             Some("image_url") => {
                 obj.insert("type".to_string(), Value::String("input_image".to_string()));
@@ -643,6 +652,153 @@ pub fn wrap_body_with_gemini_translate_stream(body: Body) -> Body {
     Body::from_stream(GeminiTranslateStream::new(body))
 }
 
+// ---------------------------------------------------------------------------
+// DLP scanning for SSE streams
+// ---------------------------------------------------------------------------
+
+/// Apply DLP redaction to a single SSE `data:` line.
+///
+/// Parses the JSON, extracts `choices[0].delta.content`, runs redaction on it,
+/// and patches the JSON back if any PII was found. Returns the (possibly
+/// modified) line.
+///
+/// Lines that are not `data:` JSON or don't contain delta content are returned
+/// unchanged.
+pub fn redact_sse_data_line(line: &str, scanner: &DlpScanner) -> String {
+    // Only process data: lines with JSON
+    let Some(json_str) = line.strip_prefix("data: ") else {
+        return line.to_string();
+    };
+
+    // Don't touch [DONE]
+    if json_str.starts_with("[DONE]") {
+        return line.to_string();
+    }
+
+    let Ok(mut event) = serde_json::from_str::<Value>(json_str) else {
+        return line.to_string();
+    };
+
+    // Extract delta.content from choices[0]
+    let Some(content) = event
+        .get_mut("choices")
+        .and_then(Value::as_array_mut)
+        .and_then(|choices| choices.first_mut())
+        .and_then(|choice| choice.get_mut("delta"))
+        .and_then(|delta| delta.get_mut("content"))
+    else {
+        return line.to_string();
+    };
+
+    let Some(text) = content.as_str() else {
+        return line.to_string();
+    };
+
+    let (redacted, redacted_names) = scanner.redact_all(text.as_bytes());
+    if redacted_names.is_empty() {
+        return line.to_string();
+    }
+
+    warn!(
+        redacted_patterns = ?redacted_names,
+        "PII redacted from streaming SSE chunk"
+    );
+
+    let redacted_str = String::from_utf8_lossy(&redacted);
+    *content = Value::String(redacted_str.into_owned());
+    format!("data: {}", serde_json::to_string(&event).unwrap_or_else(|_| json_str.to_string()))
+}
+
+/// Stream adapter that applies DLP redaction to SSE data lines.
+pub struct DlpSseStream {
+    inner: Pin<Box<dyn Stream<Item = Result<Bytes, axum::Error>> + Send>>,
+    buffer: BytesMut,
+    scanner: Arc<DlpScanner>,
+    output_buffer: Vec<u8>,
+}
+
+impl DlpSseStream {
+    pub fn new(body: Body, scanner: Arc<DlpScanner>) -> Self {
+        use futures_util::StreamExt;
+        use http_body_util::BodyStream;
+
+        let stream = BodyStream::new(body).filter_map(|result| async move {
+            match result {
+                Ok(frame) => frame.into_data().ok().map(Ok),
+                Err(e) => Some(Err(e)),
+            }
+        });
+
+        Self {
+            inner: Box::pin(stream),
+            buffer: BytesMut::new(),
+            scanner,
+            output_buffer: Vec::new(),
+        }
+    }
+
+    fn process_buffered_lines(&mut self) {
+        loop {
+            let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') else {
+                break;
+            };
+
+            let line_bytes = self.buffer.split_to(pos + 1);
+            let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
+
+            if line.is_empty() {
+                self.output_buffer.extend_from_slice(b"\n");
+                continue;
+            }
+
+            let redacted = redact_sse_data_line(&line, &self.scanner);
+            self.output_buffer.extend_from_slice(redacted.as_bytes());
+            self.output_buffer.extend_from_slice(b"\n");
+        }
+    }
+}
+
+impl Stream for DlpSseStream {
+    type Item = Result<Bytes, axum::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if !this.output_buffer.is_empty() {
+                let data = std::mem::take(&mut this.output_buffer);
+                return Poll::Ready(Some(Ok(Bytes::from(data))));
+            }
+
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    this.buffer.extend_from_slice(&chunk);
+                    this.process_buffered_lines();
+                }
+                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                Poll::Ready(None) => {
+                    if !this.buffer.is_empty() {
+                        let remaining = std::mem::take(&mut this.buffer);
+                        let line = String::from_utf8_lossy(&remaining).trim().to_string();
+                        if !line.is_empty() {
+                            let redacted = redact_sse_data_line(&line, &this.scanner);
+                            return Poll::Ready(Some(Ok(Bytes::from(
+                                format!("{redacted}\n"),
+                            ))));
+                        }
+                    }
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+/// Wrap a Body in a DlpSseStream for streaming DLP redaction.
+pub fn wrap_body_with_dlp_sse_stream(body: Body, scanner: Arc<DlpScanner>) -> Body {
+    Body::from_stream(DlpSseStream::new(body, scanner))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,7 +815,7 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&result).unwrap();
 
         assert_eq!(parsed["model"], "gpt-4o-mini");
-        assert!(parsed.get("instructions").is_none());
+        assert_eq!(parsed["instructions"], "", "instructions should be empty when no system messages");
         let input = parsed["input"].as_array().unwrap();
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "message");
@@ -956,5 +1112,69 @@ mod tests {
         assert_eq!(parsed["input"][0]["type"], "message");
         assert_eq!(parsed["input"][0]["role"], "user");
         assert_eq!(parsed["input"][0]["content"], "hello");
+    }
+
+    // -----------------------------------------------------------------------
+    // DLP SSE redaction tests
+    // -----------------------------------------------------------------------
+
+    fn test_dlp_scanner() -> DlpScanner {
+        use crate::config::{DlpAction, DlpPattern};
+        DlpScanner::new(
+            &[
+                DlpPattern {
+                    name: "email".to_string(),
+                    regex: r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b".to_string(),
+                    action: DlpAction::Redact,
+                },
+                DlpPattern {
+                    name: "ssn".to_string(),
+                    regex: r"\b\d{3}-\d{2}-\d{4}\b".to_string(),
+                    action: DlpAction::Block,
+                },
+            ],
+            true,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_redact_sse_data_line_with_pii() {
+        let scanner = test_dlp_scanner();
+        let line = r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Contact user@example.com for info"},"finish_reason":null}]}"#;
+        let result = redact_sse_data_line(line, &scanner);
+        assert!(result.starts_with("data: "), "Should still be an SSE data line");
+        assert!(result.contains("[REDACTED:email]"), "Email should be redacted");
+        assert!(!result.contains("user@example.com"), "Original email should be gone");
+    }
+
+    #[test]
+    fn test_redact_sse_data_line_clean() {
+        let scanner = test_dlp_scanner();
+        let line = r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello world"},"finish_reason":null}]}"#;
+        let result = redact_sse_data_line(line, &scanner);
+        assert_eq!(result, line, "Clean content should pass through unchanged");
+    }
+
+    #[test]
+    fn test_redact_sse_data_line_done() {
+        let scanner = test_dlp_scanner();
+        let result = redact_sse_data_line("data: [DONE]", &scanner);
+        assert_eq!(result, "data: [DONE]");
+    }
+
+    #[test]
+    fn test_redact_sse_data_line_no_delta_content() {
+        let scanner = test_dlp_scanner();
+        let line = r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        let result = redact_sse_data_line(line, &scanner);
+        assert_eq!(result, line, "Lines without delta.content pass through unchanged");
+    }
+
+    #[test]
+    fn test_redact_sse_data_line_non_data_line() {
+        let scanner = test_dlp_scanner();
+        let result = redact_sse_data_line("event: message", &scanner);
+        assert_eq!(result, "event: message", "Non-data lines pass through unchanged");
     }
 }

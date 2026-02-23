@@ -641,14 +641,18 @@ async fn handle_request(
                 Response::from_parts(parts, Body::from(body))
             }
         } else {
-            warn!(
+            debug!(
                 method = %method,
                 path = %path,
                 virtual_key = %virtual_key,
-                "Streaming response (SSE) — DLP scanning is not supported for streaming responses; \
-                 PII in streamed content will not be redacted"
+                "Streaming response (SSE) — wrapping with DLP SSE scanner"
             );
-            response
+            let (parts, body) = response.into_parts();
+            let dlp_body = crate::translate::wrap_body_with_dlp_sse_stream(
+                body,
+                state.dlp_scanner.clone(),
+            );
+            Response::from_parts(parts, dlp_body)
         }
     } else {
         trace!("Response DLP scanning disabled");
@@ -710,7 +714,8 @@ async fn forward_oauth_request(
         .oauth_registry
         .response_format(oauth_provider_id, &original_path)
         .map_err(|e| format!("OAuth response format check failed: {e}"))?;
-    let stream_requested = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+    // Check the transformed body for stream flag (fixups may force stream: true)
+    let stream_requested = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .and_then(|v| v.get("stream")?.as_bool())
         .unwrap_or(false);

@@ -1459,8 +1459,7 @@ async fn test_non_utf8_body_passes_through() {
 async fn test_streaming_response_with_dlp_enabled_passes_through() {
     let mock_server = MockServer::start().await;
 
-    // SSE response — should pass through when DLP scanning is enabled
-    // because streaming responses cannot be scanned (exercises lib.rs lines 261-268)
+    // SSE response with clean content — should pass through DLP scanning unchanged
     let sse_body = "data: {\"content\":\"hello world\"}\n\ndata: [DONE]\n\n";
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -1499,6 +1498,51 @@ async fn test_streaming_response_with_dlp_enabled_passes_through() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let body_str = std::str::from_utf8(&body).unwrap();
     assert!(body_str.contains("[DONE]"));
+}
+
+#[tokio::test]
+async fn test_streaming_response_dlp_redacts_pii_in_sse() {
+    let mock_server = MockServer::start().await;
+
+    // SSE response with PII in delta.content — DLP should redact it
+    let chunk = serde_json::json!({
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "choices": [{
+            "index": 0,
+            "delta": { "content": "Contact user@example.com for help" },
+            "finish_reason": null,
+        }]
+    });
+    let sse_body = format!("data: {}\n\ndata: [DONE]\n\n", serde_json::to_string(&chunk).unwrap());
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(sse_body, "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let app = make_app_with_redact(&mock_server.uri());
+    let body = r#"{"model":"gpt-4","stream":true,"messages":[{"role":"user","content":"Hi"}]}"#;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk-test-1")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let body_str = std::str::from_utf8(&body).unwrap();
+    assert!(body_str.contains("[REDACTED:email]"), "PII should be redacted in streaming SSE");
+    assert!(!body_str.contains("user@example.com"), "Original email should be gone");
+    assert!(body_str.contains("[DONE]"), "Stream should still end with [DONE]");
 }
 
 fn make_email_app(
