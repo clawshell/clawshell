@@ -12,6 +12,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use bytes::Bytes;
@@ -129,7 +130,26 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", any(handle_request))
         .route("/{*path}", any(handle_request))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .layer(axum::middleware::from_fn(log_request_completion))
         .with_state(state)
+}
+
+async fn log_request_completion(request: Request, next: Next) -> Response {
+    let start = Instant::now();
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+
+    let response = next.run(request).await;
+
+    info!(
+        method = %method,
+        path = %path,
+        status = %response.status(),
+        latency_ms = start.elapsed().as_millis(),
+        "Request completed"
+    );
+
+    response
 }
 
 #[derive(Debug, Deserialize)]
@@ -416,7 +436,6 @@ async fn handle_request(
     State(state): State<AppState>,
     request: Request,
 ) -> Result<Response, Response> {
-    let start = Instant::now();
     let (parts, body) = request.into_parts();
     let method = parts.method;
     let uri = parts.uri;
@@ -606,16 +625,6 @@ async fn handle_request(
         trace!("Response DLP scanning disabled");
         response
     };
-
-    let latency = start.elapsed();
-    info!(
-        method = %method,
-        path = %path,
-        virtual_key = %virtual_key,
-        status = %response.status(),
-        latency_ms = latency.as_millis(),
-        "Request completed"
-    );
 
     Ok(response)
 }
