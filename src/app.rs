@@ -706,6 +706,10 @@ async fn forward_oauth_request(
         .oauth_registry
         .needs_response_translation(oauth_provider_id, &original_path)
         .map_err(|e| format!("OAuth translation check failed: {e}"))?;
+    let response_format = state
+        .oauth_registry
+        .response_format(oauth_provider_id, &original_path)
+        .map_err(|e| format!("OAuth response format check failed: {e}"))?;
     let stream_requested = serde_json::from_slice::<serde_json::Value>(&body_bytes)
         .ok()
         .and_then(|v| v.get("stream")?.as_bool())
@@ -761,7 +765,7 @@ async fn forward_oauth_request(
                 error = %e,
                 "Token refresh failed after 401"
             );
-            return maybe_translate_response(response, needs_translation, stream_requested).await;
+            return maybe_translate_response(response, needs_translation, stream_requested, response_format).await;
         }
 
         // Re-inject auth with refreshed token
@@ -805,7 +809,7 @@ async fn forward_oauth_request(
             );
         }
 
-        return maybe_translate_response(retry_response, needs_translation, stream_requested).await;
+        return maybe_translate_response(retry_response, needs_translation, stream_requested, response_format).await;
     }
 
     // Log error response bodies for debugging upstream issues
@@ -827,21 +831,25 @@ async fn forward_oauth_request(
             );
         }
         let response = Response::from_parts(parts, Body::from(body_bytes_resp));
-        return maybe_translate_response(response, needs_translation, stream_requested).await;
+        return maybe_translate_response(response, needs_translation, stream_requested, response_format).await;
     }
 
-    maybe_translate_response(response, needs_translation, stream_requested).await
+    maybe_translate_response(response, needs_translation, stream_requested, response_format).await
 }
 
-/// Optionally translate a Responses API response back to chat/completions format.
+/// Optionally translate an upstream response back to chat/completions format.
 async fn maybe_translate_response(
     response: Response,
     needs_translation: bool,
     stream_requested: bool,
+    response_format: Option<crate::oauth::ResponseFormat>,
 ) -> Result<Response, String> {
-    if !needs_translation {
-        return Ok(response);
-    }
+    // Use response_format if available; fall back to needs_translation for backwards compat
+    let format = match response_format {
+        Some(f) => f,
+        None if needs_translation => crate::oauth::ResponseFormat::ResponsesApi,
+        None => return Ok(response),
+    };
 
     let is_streaming = stream_requested
         || response
@@ -850,9 +858,20 @@ async fn maybe_translate_response(
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.contains("text/event-stream"));
 
+    debug!(format = ?format, is_streaming, "maybe_translate_response: translating response");
+
     if is_streaming {
         let (parts, body) = response.into_parts();
-        let translated_body = crate::translate::wrap_body_with_translate_stream(body);
+        let translated_body = match format {
+            crate::oauth::ResponseFormat::ResponsesApi => {
+                debug!("Wrapping streaming response with ResponsesApi translator");
+                crate::translate::wrap_body_with_translate_stream(body)
+            }
+            crate::oauth::ResponseFormat::GeminiSse => {
+                debug!("Wrapping streaming response with GeminiSse translator");
+                crate::translate::wrap_body_with_gemini_translate_stream(body)
+            }
+        };
         return Ok(Response::from_parts(parts, translated_body));
     }
 
@@ -869,13 +888,21 @@ async fn maybe_translate_response(
         .map_err(|e| format!("failed to read response body for translation: {e}"))?
         .to_bytes();
 
-    match crate::translate::responses_to_chat_completion(&body_bytes) {
-        Ok(translated) => {
-            parts.headers.remove("content-length");
-            Ok(Response::from_parts(parts, Body::from(translated)))
+    match format {
+        crate::oauth::ResponseFormat::ResponsesApi => {
+            match crate::translate::responses_to_chat_completion(&body_bytes) {
+                Ok(translated) => {
+                    parts.headers.remove("content-length");
+                    Ok(Response::from_parts(parts, Body::from(translated)))
+                }
+                Err(e) => {
+                    warn!(error = %e, "Response translation failed, returning original");
+                    Ok(Response::from_parts(parts, Body::from(body_bytes)))
+                }
+            }
         }
-        Err(e) => {
-            warn!(error = %e, "Response translation failed, returning original");
+        crate::oauth::ResponseFormat::GeminiSse => {
+            // Non-streaming Gemini responses are not expected; pass through
             Ok(Response::from_parts(parts, Body::from(body_bytes)))
         }
     }

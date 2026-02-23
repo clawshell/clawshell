@@ -148,6 +148,21 @@ pub trait OAuthProvider: Send + Sync + fmt::Debug {
     fn needs_response_translation(&self, _original_path: &str) -> bool {
         false
     }
+
+    /// What format the upstream response is in, for translation purposes.
+    /// Returns `None` if no translation is needed (passthrough).
+    fn response_format(&self, _original_path: &str) -> Option<ResponseFormat> {
+        None
+    }
+}
+
+/// The format of upstream API responses, used to select the correct translator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseFormat {
+    /// OpenAI Responses API → translate to chat.completion format
+    ResponsesApi,
+    /// Google Gemini SSE → translate to chat.completion format
+    GeminiSse,
 }
 
 /// Configuration for an OAuth provider from TOML.
@@ -435,6 +450,18 @@ impl OAuthRegistry {
             .get(provider_id)
             .ok_or_else(|| OAuthError::ProviderNotFound(provider_id.to_string()))?;
         Ok(provider.needs_response_translation(original_path))
+    }
+
+    pub fn response_format(
+        &self,
+        provider_id: &str,
+        original_path: &str,
+    ) -> Result<Option<ResponseFormat>, OAuthError> {
+        let provider = self
+            .providers
+            .get(provider_id)
+            .ok_or_else(|| OAuthError::ProviderNotFound(provider_id.to_string()))?;
+        Ok(provider.response_format(original_path))
     }
 
     pub fn has_provider(&self, id: &str) -> bool {

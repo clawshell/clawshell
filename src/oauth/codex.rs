@@ -416,6 +416,14 @@ impl OAuthProvider for CodexProvider {
     fn needs_response_translation(&self, original_path: &str) -> bool {
         original_path == "/v1/chat/completions"
     }
+
+    fn response_format(&self, original_path: &str) -> Option<super::ResponseFormat> {
+        if original_path == "/v1/chat/completions" {
+            Some(super::ResponseFormat::ResponsesApi)
+        } else {
+            None
+        }
+    }
 }
 
 /// Wait for an OAuth callback on a local HTTP server.

@@ -4,6 +4,7 @@ use futures_util::Stream;
 use serde_json::Value;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use tracing::debug;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TranslateError {
@@ -82,11 +83,19 @@ pub fn chat_completions_to_responses(body: &[u8]) -> Result<Vec<u8>, TranslateEr
     Ok(serde_json::to_vec(&Value::Object(result))?)
 }
 
-/// Convert chat/completions content types to responses API content types.
-/// - `type: "text"` → `type: "input_text"`
-/// - `type: "image_url"` → `type: "input_image"` with `image_url` → `image_url`
-/// String content is left as-is (the Responses API accepts string content directly).
+/// Convert a chat/completions message to a Responses API input item.
+/// - Adds `type: "message"` (required by Responses API)
+/// - Converts content `type: "text"` → `type: "input_text"`
+/// - Converts content `type: "image_url"` → `type: "input_image"`
+/// - String content is left as-is (the Responses API accepts string content directly).
 fn convert_message_content(mut msg: Value) -> Value {
+    // Responses API requires "type": "message" on each input item
+    if let Some(obj) = msg.as_object_mut() {
+        if !obj.contains_key("type") {
+            obj.insert("type".to_string(), Value::String("message".to_string()));
+        }
+    }
+
     let Some(content) = msg.get_mut("content") else {
         return msg;
     };
@@ -420,6 +429,220 @@ pub fn wrap_body_with_translate_stream(body: Body) -> Body {
     Body::from_stream(TranslateStream::new(body))
 }
 
+// ---------------------------------------------------------------------------
+// Gemini SSE → OpenAI chat.completion.chunk translation
+// ---------------------------------------------------------------------------
+
+/// Translate a single SSE line from Gemini streamGenerateContent format
+/// to OpenAI chat.completion.chunk format.
+///
+/// Gemini SSE events look like:
+/// ```text
+/// data: {"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"},...}],...}
+/// ```
+///
+/// Returns `Some(line)` for data events, `None` for events to suppress.
+pub fn translate_gemini_sse_line(
+    line: &str,
+    model: &mut Option<String>,
+) -> Option<String> {
+    // Pass through [DONE]
+    if line.starts_with("data: [DONE]") {
+        return Some(line.to_string());
+    }
+
+    let json_str = line.strip_prefix("data: ")?;
+    let event: Value = serde_json::from_str(json_str).ok()?;
+
+    // Cloudcode-pa wraps the Gemini payload in a "response" envelope
+    let inner = event.get("response").unwrap_or(&event);
+
+    // Capture model from modelVersion if present
+    if let Some(m) = inner.get("modelVersion").and_then(Value::as_str) {
+        *model = Some(m.to_string());
+    }
+
+    let candidates = inner.get("candidates").and_then(Value::as_array)?;
+    let candidate = candidates.first()?;
+
+    let finish_reason = candidate
+        .get("finishReason")
+        .and_then(Value::as_str);
+
+    let parts = candidate
+        .get("content")
+        .and_then(|c| c.get("parts"))
+        .and_then(Value::as_array);
+
+    let text = parts
+        .and_then(|p| p.first())
+        .and_then(|p| p.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let m = model.as_deref().unwrap_or("unknown");
+    let id = "chatcmpl-gemini";
+
+    // If there's a finish reason (STOP, MAX_TOKENS, etc.), emit final chunk + [DONE]
+    if let Some(reason) = finish_reason {
+        let mapped_reason = match reason {
+            "STOP" => "stop",
+            "MAX_TOKENS" => "length",
+            _ => "stop",
+        };
+
+        // Emit content delta if any, then finish chunk, then [DONE]
+        let mut result = String::new();
+        if !text.is_empty() {
+            let content_chunk = serde_json::json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "model": m,
+                "choices": [{
+                    "index": 0,
+                    "delta": { "content": text },
+                    "finish_reason": null,
+                }]
+            });
+            result.push_str(&format!("data: {}\n\n", serde_json::to_string(&content_chunk).unwrap_or_default()));
+        }
+
+        let final_chunk = serde_json::json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "model": m,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": mapped_reason,
+            }]
+        });
+        result.push_str(&format!(
+            "data: {}\n\ndata: [DONE]",
+            serde_json::to_string(&final_chunk).unwrap_or_default()
+        ));
+        return Some(result);
+    }
+
+    // Regular content delta
+    if text.is_empty() {
+        return None;
+    }
+
+    let chunk = serde_json::json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "model": m,
+        "choices": [{
+            "index": 0,
+            "delta": { "content": text },
+            "finish_reason": null,
+        }]
+    });
+    Some(format!("data: {}", serde_json::to_string(&chunk).unwrap_or_default()))
+}
+
+/// Stream adapter for Gemini SSE → OpenAI chat.completion.chunk.
+pub struct GeminiTranslateStream {
+    inner: Pin<Box<dyn Stream<Item = Result<Bytes, axum::Error>> + Send>>,
+    buffer: BytesMut,
+    model: Option<String>,
+    output_buffer: Vec<u8>,
+}
+
+impl GeminiTranslateStream {
+    pub fn new(body: Body) -> Self {
+        use http_body_util::BodyStream;
+        use futures_util::StreamExt;
+
+        debug!("GeminiTranslateStream created — will translate Gemini SSE → OpenAI chat.completion.chunk");
+
+        let stream = BodyStream::new(body).filter_map(|result| async move {
+            match result {
+                Ok(frame) => frame.into_data().ok().map(Ok),
+                Err(e) => Some(Err(e)),
+            }
+        });
+
+        Self {
+            inner: Box::pin(stream),
+            buffer: BytesMut::new(),
+            model: None,
+            output_buffer: Vec::new(),
+        }
+    }
+
+    fn process_buffered_lines(&mut self) {
+        loop {
+            let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') else {
+                break;
+            };
+
+            let line_bytes = self.buffer.split_to(pos + 1);
+            let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
+
+            if line.is_empty() {
+                self.output_buffer.extend_from_slice(b"\n");
+                continue;
+            }
+
+            debug!(gemini_line = %line.chars().take(200).collect::<String>(), "GeminiTranslateStream: incoming line");
+
+            if let Some(translated) = translate_gemini_sse_line(&line, &mut self.model) {
+                debug!(translated_preview = %translated.chars().take(200).collect::<String>(), "GeminiTranslateStream: translated");
+                self.output_buffer.extend_from_slice(translated.as_bytes());
+                self.output_buffer.extend_from_slice(b"\n\n");
+            } else {
+                debug!("GeminiTranslateStream: line produced no translation output");
+            }
+        }
+    }
+}
+
+impl Stream for GeminiTranslateStream {
+    type Item = Result<Bytes, axum::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if !this.output_buffer.is_empty() {
+                let data = std::mem::take(&mut this.output_buffer);
+                return Poll::Ready(Some(Ok(Bytes::from(data))));
+            }
+
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    this.buffer.extend_from_slice(&chunk);
+                    this.process_buffered_lines();
+                }
+                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                Poll::Ready(None) => {
+                    if !this.buffer.is_empty() {
+                        let remaining = std::mem::take(&mut this.buffer);
+                        let line = String::from_utf8_lossy(&remaining).trim().to_string();
+                        if !line.is_empty() {
+                            if let Some(translated) =
+                                translate_gemini_sse_line(&line, &mut this.model)
+                            {
+                                return Poll::Ready(Some(Ok(Bytes::from(
+                                    format!("{translated}\n\n"),
+                                ))));
+                            }
+                        }
+                    }
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+/// Wrap a Body in a GeminiTranslateStream and return a new Body.
+pub fn wrap_body_with_gemini_translate_stream(body: Body) -> Body {
+    Body::from_stream(GeminiTranslateStream::new(body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,6 +662,7 @@ mod tests {
         assert!(parsed.get("instructions").is_none());
         let input = parsed["input"].as_array().unwrap();
         assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "message");
         assert_eq!(input[0]["role"], "user");
         assert_eq!(input[0]["content"], "say hi");
         assert!(parsed.get("messages").is_none());
@@ -710,6 +934,7 @@ mod tests {
 
         let result = chat_completions_to_responses(&body).unwrap();
         let parsed: Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(parsed["input"][0]["type"], "message");
         let content = parsed["input"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "input_text");
         assert_eq!(content[0]["text"], "What is in this image?");
@@ -728,6 +953,8 @@ mod tests {
 
         let result = chat_completions_to_responses(&body).unwrap();
         let parsed: Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(parsed["input"][0]["type"], "message");
+        assert_eq!(parsed["input"][0]["role"], "user");
         assert_eq!(parsed["input"][0]["content"], "hello");
     }
 }
