@@ -138,12 +138,13 @@ async fn log_request_completion(request: Request, next: Next) -> Response {
     let start = Instant::now();
     let method = request.method().clone();
     let path = request.uri().path().to_string();
-
+    let query = request.uri().query().map(|q| q.to_string());
     let response = next.run(request).await;
 
     info!(
         method = %method,
         path = %path,
+        query = %query.as_deref().unwrap_or(""),
         status = %response.status(),
         latency_ms = start.elapsed().as_millis(),
         "Request completed"
@@ -308,6 +309,14 @@ async fn handle_email_secure_messages(
         });
     }
 
+    info!(
+        method = %method,
+        path = %path,
+        query = ?query,
+        virtual_key = %virtual_key,
+        "fetched messages metadata"
+    );
+
     let response = EmailSecureMessagesResponse {
         messages: visible_messages,
         next_page_token: email_response.next_page_token,
@@ -421,6 +430,12 @@ async fn handle_email_message_content(
             "Email message not found",
         ));
     }
+
+    info!(
+        virtual_key = %virtual_key,
+        message_id = %message_id,
+        "Fetched message content"
+    );
 
     let response = EmailMessageContentResponse {
         metadata: content.metadata,
