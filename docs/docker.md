@@ -31,6 +31,14 @@ Run the interactive onboard wizard to generate configuration:
 docker run --rm -it clawshell onboard
 ```
 
+If you're onboarding with Antigravity/Google OAuth, publish the callback port:
+
+```bash
+docker run --rm -it \
+  -p 51121:51121 \
+  clawshell onboard
+```
+
 This creates the configuration files inside the container. To persist them,
 mount a volume for `/etc/clawshell`:
 
@@ -121,9 +129,14 @@ No extra environment variables are needed for Codex.
 Requires `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` (provided
 via the `.env` file baked into the image at build time).
 
-Uses a copy/paste flow. The wizard prints a Google authorization URL. Open it
-in your browser, authorize, then copy the authorization code from the result
-page and paste it back into the terminal.
+Uses a localhost callback flow on port `51121`. During onboarding:
+
+1. Run the container with `-p 51121:51121`.
+2. Open the printed Google authorization URL.
+3. Complete consent; Google redirects to `http://localhost:51121/oauth-callback...`.
+
+The `Dockerfile` sets `CLAWSHELL_OAUTH_CALLBACK_HOST=0.0.0.0` so the callback
+listener inside the container accepts the published port.
 
 ## Stopping
 
@@ -145,7 +158,8 @@ cargo build --release
 docker build -t clawshell .
 
 # 3. Onboard (interactive — creates config in the volume)
-docker run --rm -it -v clawshell-config:/etc/clawshell clawshell onboard
+#    Add -p 51121:51121 if using Antigravity/Google OAuth.
+docker run --rm -it -v clawshell-config:/etc/clawshell -p 51121:51121 clawshell onboard
 
 # 4. Run
 docker run -d \
