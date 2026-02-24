@@ -335,11 +335,9 @@ pub fn wrap_antigravity_request(
         .get("model")
         .and_then(|v| v.as_str())
         .unwrap_or("gemini-2.0-flash");
-    // Strip provider prefix (e.g. "google/gemini-2.5-flash" → "gemini-2.5-flash")
-    let model = raw_model
-        .split_once('/')
-        .map(|(_, id)| id)
-        .unwrap_or(raw_model);
+    // Strip provider prefix (e.g. "google/gemini-2.5-flash" or
+    // "custom-provider/google/gemini-2.5-flash" → "gemini-2.5-flash")
+    let model = raw_model.rsplit('/').next().unwrap_or(raw_model);
 
     let mut request = serde_json::Map::new();
 
@@ -353,7 +351,8 @@ pub fn wrap_antigravity_request(
             let parts = message_content_to_gemini_parts(msg);
 
             match role {
-                "system" => {
+                // OpenAI/Codex "developer" has system-like semantics.
+                "system" | "developer" => {
                     system_parts.extend(parts);
                 }
                 "assistant" => {
@@ -362,10 +361,17 @@ pub fn wrap_antigravity_request(
                         "parts": parts,
                     }));
                 }
-                _ => {
-                    // "user", "tool", and anything else → keep role as-is
+                "user" => {
                     contents.push(serde_json::json!({
-                        "role": role,
+                        "role": "user",
+                        "parts": parts,
+                    }));
+                }
+                _ => {
+                    // Gemini contents only support "user"/"model" roles.
+                    // Coerce tool/unknown roles to "user" to avoid INVALID_ARGUMENT.
+                    contents.push(serde_json::json!({
+                        "role": "user",
                         "parts": parts,
                     }));
                 }
@@ -865,6 +871,20 @@ mod tests {
     }
 
     #[test]
+    fn test_wrap_antigravity_request_strips_nested_provider_prefixes() {
+        let body = serde_json::json!({
+            "model": "custom-clawshell-18790/google/gemini-2.0-flash",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+
+        let wrapped = wrap_antigravity_request(&body_bytes, "proj-123").unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&wrapped).unwrap();
+
+        assert_eq!(parsed["model"], "gemini-2.0-flash");
+    }
+
+    #[test]
     fn test_wrap_antigravity_system_message() {
         let body = serde_json::json!({
             "model": "gemini-2.0-flash",
@@ -887,6 +907,30 @@ mod tests {
         let contents = parsed["request"]["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0]["role"], "user");
+    }
+
+    #[test]
+    fn test_wrap_antigravity_developer_message_maps_to_system_instruction() {
+        let body = serde_json::json!({
+            "model": "gemini-2.0-flash",
+            "messages": [
+                {"role": "developer", "content": "Follow this policy."},
+                {"role": "user", "content": "hello"}
+            ]
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+
+        let wrapped = wrap_antigravity_request(&body_bytes, "proj-123").unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&wrapped).unwrap();
+
+        assert_eq!(
+            parsed["request"]["systemInstruction"]["parts"][0]["text"],
+            "Follow this policy."
+        );
+        let contents = parsed["request"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(contents[0]["parts"][0]["text"], "hello");
     }
 
     #[test]
