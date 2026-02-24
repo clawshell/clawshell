@@ -8,8 +8,12 @@ services:
     command: ["gateway","run","--bind","lan","--port","18789"]
     ports:
       - "18789:18789"
+    environment:
+      UID: $UID
+      GID: $GID
+      USER: $USER
     volumes:
-      - config-openclaw:/home/node/.openclaw
+      - config-openclaw:/home/$USER/.openclaw
     restart: unless-stopped
 
   clawshell:
