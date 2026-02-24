@@ -78,6 +78,18 @@ port = 18790
 
 Or pass it during onboard when prompted for the server host.
 
+You can also override server bind host/port at runtime:
+
+```bash
+docker run -d \
+  --name clawshell \
+  -p 17890:17890 \
+  -e CLAWSHELL_SERVER_HOST=0.0.0.0 \
+  -e CLAWSHELL_SERVER_PORT=17890 \
+  -v clawshell-config:/etc/clawshell \
+  clawshell start --foreground
+```
+
 ## Configuration volume
 
 All ClawShell state lives under `/etc/clawshell`:
@@ -104,6 +116,13 @@ docker run --rm -it \
 ```
 
 Runtime `-e` flags take precedence over the baked-in `.env` file.
+
+### Runtime server bind overrides
+
+| Variable                 | Description                               |
+|--------------------------|-------------------------------------------|
+| `CLAWSHELL_SERVER_HOST`  | Overrides `[server].host` (e.g. `0.0.0.0`) |
+| `CLAWSHELL_SERVER_PORT`  | Overrides `[server].port` (e.g. `17890`)   |
 
 ### Required variables for Antigravity / Google OAuth
 

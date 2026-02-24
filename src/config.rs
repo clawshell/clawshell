@@ -1,6 +1,7 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::env::VarError;
 use std::path::Path;
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -61,6 +62,9 @@ fn default_host() -> String {
 fn default_port() -> u16 {
     18790
 }
+
+const SERVER_HOST_ENV: &str = "CLAWSHELL_SERVER_HOST";
+const SERVER_PORT_ENV: &str = "CLAWSHELL_SERVER_PORT";
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -425,6 +429,61 @@ impl Config {
     pub fn listen_addr(&self) -> String {
         format!("{}:{}", self.server.host, self.server.port)
     }
+
+    pub fn resolved_listen_addr(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let host = resolve_server_host_override(&self.server.host)?;
+        let port = resolve_server_port_override(self.server.port)?;
+        Ok(format!("{host}:{port}"))
+    }
+}
+
+fn resolve_server_host_override(default_host: &str) -> Result<String, Box<dyn std::error::Error>> {
+    resolve_server_host_override_from_var(default_host, std::env::var(SERVER_HOST_ENV))
+}
+
+fn resolve_server_host_override_from_var(
+    default_host: &str,
+    env_value: Result<String, VarError>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match env_value {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(format!("{SERVER_HOST_ENV} cannot be empty").into());
+            }
+            Ok(trimmed.to_string())
+        }
+        Err(VarError::NotPresent) => Ok(default_host.to_string()),
+        Err(VarError::NotUnicode(_)) => {
+            Err(format!("{SERVER_HOST_ENV} must be valid UTF-8").into())
+        }
+    }
+}
+
+fn resolve_server_port_override(default_port: u16) -> Result<u16, Box<dyn std::error::Error>> {
+    resolve_server_port_override_from_var(default_port, std::env::var(SERVER_PORT_ENV))
+}
+
+fn resolve_server_port_override_from_var(
+    default_port: u16,
+    env_value: Result<String, VarError>,
+) -> Result<u16, Box<dyn std::error::Error>> {
+    match env_value {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(format!("{SERVER_PORT_ENV} cannot be empty").into());
+            }
+            trimmed.parse::<u16>().map_err(|_| {
+                format!("{SERVER_PORT_ENV} must be a valid port (0-65535), got '{trimmed}'")
+                    .into()
+            })
+        }
+        Err(VarError::NotPresent) => Ok(default_port),
+        Err(VarError::NotUnicode(_)) => {
+            Err(format!("{SERVER_PORT_ENV} must be valid UTF-8").into())
+        }
+    }
 }
 
 pub(crate) fn validate_sender_rule(rule: &str) -> Result<(), String> {
@@ -581,6 +640,7 @@ mod tests {
         });
         Ok(())
     }
+
 
     #[test]
     fn test_valid_config_fixtures() {
@@ -933,5 +993,63 @@ imap_port = 0
             err.to_string()
                 .contains("email.accounts[].imap_port must be greater than 0")
         );
+    }
+
+    #[test]
+    fn test_resolved_listen_addr_uses_config_without_env() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+"#;
+        let parsed = Config::parse(cfg).expect("config should parse");
+        assert_eq!(parsed.listen_addr(), "127.0.0.1:3000");
+    }
+
+    #[test]
+    fn test_resolve_server_host_override_uses_default_when_unset() {
+        let host = resolve_server_host_override_from_var("127.0.0.1", Err(VarError::NotPresent))
+            .expect("host should use default");
+        assert_eq!(host, "127.0.0.1");
+    }
+
+    #[test]
+    fn test_resolve_server_host_override_accepts_env() {
+        let host = resolve_server_host_override_from_var("127.0.0.1", Ok("0.0.0.0".to_string()))
+            .expect("host override should be accepted");
+        assert_eq!(host, "0.0.0.0");
+    }
+
+    #[test]
+    fn test_resolve_server_host_override_rejects_empty_env() {
+        let err = resolve_server_host_override_from_var("127.0.0.1", Ok("   ".to_string()))
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("CLAWSHELL_SERVER_HOST cannot be empty")
+        );
+    }
+
+    #[test]
+    fn test_resolve_server_port_override_uses_default_when_unset() {
+        let port =
+            resolve_server_port_override_from_var(3000, Err(VarError::NotPresent)).unwrap();
+        assert_eq!(port, 3000);
+    }
+
+    #[test]
+    fn test_resolve_server_port_override_accepts_env() {
+        let port = resolve_server_port_override_from_var(3000, Ok("17890".to_string())).unwrap();
+        assert_eq!(port, 17890);
+    }
+
+    #[test]
+    fn test_resolve_server_port_override_rejects_invalid_env() {
+        let err = resolve_server_port_override_from_var(3000, Ok("not-a-port".to_string()))
+            .unwrap_err();
+        assert!(err.to_string().contains("CLAWSHELL_SERVER_PORT must be a valid port"));
     }
 }

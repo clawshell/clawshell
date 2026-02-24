@@ -173,6 +173,12 @@ sudo clawshell migrate-config
 
 By default ClawShell listens on `127.0.0.1:18790`.
 
+You can override the bind address at runtime with environment variables:
+
+```bash
+CLAWSHELL_SERVER_HOST=0.0.0.0 CLAWSHELL_SERVER_PORT=17890 clawshell start --foreground
+```
+
 ### Customized Configuration
 
 ClawShell reads its config from `/etc/clawshell/clawshell.toml`. You can view or edit it with:
