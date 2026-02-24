@@ -1,0 +1,35 @@
+services:
+  openclaw-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.openclaw
+    image: openclaw
+    container_name: openclaw-gateway
+    command: ["gateway"]
+    ports:
+      - "18789:18789"
+    volumes:
+      - openclaw-config:/home/node/.openclaw
+    restart: unless-stopped
+
+  clawshell:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: clawshell
+    container_name: clawshell
+    depends_on:
+      - openclaw-gateway
+    command: ["start", "--config", "/etc/clawshell/clawshell.toml", "--foreground"]
+    environment:
+      CLAWSHELL_SERVER_HOST: "0.0.0.0"
+      CLAWSHELL_OAUTH_CALLBACK_HOST: "0.0.0.0"
+    ports:
+      - "18790:18790"
+      - "51121:51121"
+    volumes:
+      - clawshell-config:/etc/clawshell
+    restart: unless-stopped
+
+volumes:
+  clawshell-config:
