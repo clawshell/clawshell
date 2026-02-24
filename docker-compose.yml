@@ -24,6 +24,9 @@ services:
     environment:
       CLAWSHELL_SERVER_HOST: "0.0.0.0"
       CLAWSHELL_OAUTH_CALLBACK_HOST: "0.0.0.0"
+      UID: $UID
+      GID: $GID
+      USER: $USER
     ports:
       - "18790:18790"
       - "51121:51121"
