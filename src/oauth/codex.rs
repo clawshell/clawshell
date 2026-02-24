@@ -433,7 +433,7 @@ async fn wait_for_oauth_callback(
 ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
+    let listener = tokio::net::TcpListener::bind(super::callback_bind_addr(port)).await?;
     let (mut stream, _) = listener.accept().await?;
 
     let mut buf = vec![0u8; 4096];

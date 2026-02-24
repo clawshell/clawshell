@@ -187,6 +187,18 @@ fn default_true() -> bool {
     true
 }
 
+const CALLBACK_BIND_HOST_ENV: &str = "CLAWSHELL_OAUTH_CALLBACK_HOST";
+const DEFAULT_CALLBACK_BIND_HOST: &str = "127.0.0.1";
+
+pub(crate) fn callback_bind_addr(port: u16) -> String {
+    let host = std::env::var(CALLBACK_BIND_HOST_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_CALLBACK_BIND_HOST.to_string());
+    format!("{host}:{port}")
+}
+
 /// Manages multiple OAuth providers, their tokens, and per-provider refresh tasks.
 #[derive(Debug)]
 pub struct OAuthRegistry {

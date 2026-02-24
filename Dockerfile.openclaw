@@ -1,0 +1,10 @@
+FROM debian:13.3-slim
+RUN apt-get update -y && apt-get install -y nodejs npm nodeenv linux-headers-generic make g++ cmake git sudo ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN useradd -m node
+RUN echo "node ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+USER node
+RUN nodeenv --node=24.13.1 --npm=v11.8.0 /home/node/nodeenv
+RUN cd /home/node && . ./nodeenv/bin/activate && npm install -g openclaw@latest
+
+ENV PATH="/home/node/nodeenv/bin:$PATH"
+ENTRYPOINT ["/home/node/nodeenv/bin/openclaw"]

@@ -578,8 +578,12 @@ async fn cmd_start_inner(config_path: &str) -> Result<(), Box<dyn std::error::Er
         .with_target(true)
         .init();
 
+    let listen_addr = config
+        .resolved_listen_addr()
+        .map_err(|e| format!("invalid server environment override: {e}"))?;
+
     info!(
-        listen = config.listen_addr(),
+        listen = %listen_addr,
         upstream = config.upstream.openai_base_url,
         keys = config.keys.len(),
         oauth_providers = config.oauth_providers.len(),
@@ -596,7 +600,7 @@ async fn cmd_start_inner(config_path: &str) -> Result<(), Box<dyn std::error::Er
     let cancel = tokio_util::sync::CancellationToken::new();
     app_state.oauth_registry.spawn_refresh_tasks(cancel.clone());
 
-    let addr: SocketAddr = config.listen_addr().parse()?;
+    let addr: SocketAddr = listen_addr.parse()?;
     let app = build_router(app_state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("Listening on {}", addr);
