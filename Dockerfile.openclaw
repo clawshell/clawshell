@@ -10,7 +10,6 @@ ENV VERSION=$VERSION
 
 RUN groupadd -r -g $GID $USER
 RUN useradd -r -m -u $UID -g $GID -s /bin/bash $USER
-RUN useradd -r -m -o -u $UID -g $GID -s /bin/bash clawshell
 
 RUN apt-get update -y && apt-get install -y nodejs npm nodeenv linux-headers-generic make g++ cmake git sudo ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN echo "$USER ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers

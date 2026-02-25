@@ -12,6 +12,7 @@ ENV CLAWSHELL_OAUTH_CALLBACK_HOST=0.0.0.0
 ENV CLAWSHELL_SERVER_HOST=0.0.0.0
 EXPOSE 18790 51121
 COPY target/release/clawshell /usr/local/bin/clawshell
+RUN sudo useradd -r -m -o -u $UID -g $GID -s /bin/bash clawshell
 USER $USER
 WORKDIR /home/node
 COPY .env /home/node/.env
