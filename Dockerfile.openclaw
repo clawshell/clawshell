@@ -1,20 +1,24 @@
 FROM debian:13.3-slim
 ARG UID=1000
 ARG GID=1000
-ARG USER=node
+ARG USER=app
+ARG VERSION=latest
 ENV UID=$UID
 ENV GID=$GID
 ENV USER=$USER
+ENV VERSION=$VERSION
 
-RUN groupadd -r -g $GID $USER && useradd -r -m -u $UID -g $GID -s /bin/bash $USER
-RUN useradd -r -m -o -u $UID -g $GID -s /bin/bash node
+RUN groupadd -r -g $GID $USER
+RUN useradd -r -m -u $UID -g $GID -s /bin/bash $USER
 RUN useradd -r -m -o -u $UID -g $GID -s /bin/bash clawshell
+
 RUN apt-get update -y && apt-get install -y nodejs npm nodeenv linux-headers-generic make g++ cmake git sudo ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN echo "$USER ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-RUN echo "node ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-USER node
+RUN mkdir /home/node && chown -R $UID:$GID /home/node
+
+USER $USER
 RUN nodeenv --node=24.13.1 --npm=v11.8.0 /home/node/nodeenv
-RUN cd /home/node && . ./nodeenv/bin/activate && npm config set prefix /home/node && npm install -g openclaw@2026.2.23
+RUN cd /home/node && . ./nodeenv/bin/activate && npm config set prefix /home/node && npm install -g openclaw@$VERSION
 
 ENV PATH="/home/node/nodeenv/bin:$PATH"
 ENTRYPOINT ["/home/node/nodeenv/bin/openclaw"]
