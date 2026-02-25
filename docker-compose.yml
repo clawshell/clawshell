@@ -11,9 +11,9 @@ services:
     environment:
       UID: $UID
       GID: $GID
-      USER: $USER
+      USER: app
     volumes:
-      - config-openclaw:/home/$USER/.openclaw
+      - config-openclaw:/home/app/.openclaw
     restart: unless-stopped
 
   clawshell:
@@ -30,7 +30,7 @@ services:
       CLAWSHELL_OAUTH_CALLBACK_HOST: "0.0.0.0"
       UID: $UID
       GID: $GID
-      USER: $USER
+      USER: app
     ports:
       - "18790:18790"
       - "51121:51121"
@@ -39,4 +39,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  clawshell-config:
+  config-openclaw:
+  config-clawshell:
