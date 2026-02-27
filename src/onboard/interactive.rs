@@ -433,13 +433,25 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
     const MENU_CODEX: &str = "Codex / ChatGPT (OAuth)";
     const MENU_ANTIGRAVITY: &str = "Antigravity / Google (OAuth)";
 
-    let all_options = [
-        MENU_OPENAI,
-        MENU_OPENROUTER,
-        MENU_ANTHROPIC,
-        MENU_CODEX,
-        MENU_ANTIGRAVITY,
-    ];
+    let show_antigravity = std::env::var("CLAWSHELL_ONBOARD_SHOW_ANTIGRAVITY_OAUTH")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    let all_options = if show_antigravity {
+        vec![
+            MENU_OPENAI,
+            MENU_OPENROUTER,
+            MENU_ANTHROPIC,
+            MENU_CODEX,
+            MENU_ANTIGRAVITY,
+        ]
+    } else {
+        vec![MENU_OPENAI, MENU_OPENROUTER, MENU_ANTHROPIC, MENU_CODEX]
+    };
 
     // Reorder so the existing choice appears first
     let preferred = match (
@@ -447,7 +459,7 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
         existing.oauth_provider.as_deref(),
         existing.provider.as_deref(),
     ) {
-        (Some("oauth"), Some("antigravity"), _) => Some(MENU_ANTIGRAVITY),
+        (Some("oauth"), Some("antigravity"), _) if show_antigravity => Some(MENU_ANTIGRAVITY),
         (Some("oauth"), Some("codex"), _) | (Some("oauth"), _, _) => Some(MENU_CODEX),
         (_, _, Some("anthropic")) => Some(MENU_ANTHROPIC),
         (_, _, Some("openrouter")) => Some(MENU_OPENROUTER),
@@ -459,7 +471,7 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
             .chain(all_options.iter().copied().filter(|o| *o != first))
             .collect()
     } else {
-        all_options.to_vec()
+        all_options
     };
 
     let provider_choice = tui::prompt_select("Select a model provider", provider_options)?;

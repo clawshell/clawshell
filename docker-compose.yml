@@ -13,8 +13,8 @@ services:
       GID: $GID
       USER: $USER
     volumes:
-      - config-openclaw:/home/app/.openclaw
-      - config-openclaw:/home/$USER/.openclaw
+      - ./config/openclaw:/home/app/.openclaw
+      - ./config/openclaw:/home/$USER/.openclaw
     restart: unless-stopped
 
   clawshell:
@@ -36,7 +36,7 @@ services:
       - "18790:18790"
       - "51121:51121"
     volumes:
-      - config-clawshell:/etc/clawshell
+      - ./config/clawshell:/etc/clawshell
     restart: unless-stopped
 
 volumes:
