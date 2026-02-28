@@ -26,7 +26,7 @@ bytes = "1.11.1"
 futures-util = "0.3.31"
 clap = { version = "4.5.58", features = ["derive"] }
 nix = { version = "0.31.1", features = ["signal", "process", "feature", "user"] }
-inquire = "0.9.3"
+inquire = "0.9.4"
 console = "0.16.2"
 vfs = "0.12"
 thiserror = "2"
