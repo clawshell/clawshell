@@ -322,13 +322,11 @@ fn mask_secret(secret: &str) -> String {
 
 /// Run the OAuth login flow for the given provider, persisting tokens.
 fn run_oauth_login(provider_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::oauth::antigravity::AntigravityProvider;
     use crate::oauth::codex::CodexProvider;
     use crate::oauth::{OAuthProvider, TokenStorage};
 
     let provider: Box<dyn OAuthProvider + Send + Sync> = match provider_id {
         "codex" => Box::new(CodexProvider::new(None, None, None, None)),
-        "antigravity" => Box::new(AntigravityProvider::new(None, None, None, None)),
         other => return Err(format!("unknown OAuth provider: {other}").into()),
     };
 
@@ -426,32 +424,12 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
 
     tui::print_section("API Configuration");
 
-    // Provider selection — 5 top-level menu items per plan
+    // Provider selection
     const MENU_OPENAI: &str = "OpenAI";
     const MENU_OPENROUTER: &str = "OpenRouter";
     const MENU_ANTHROPIC: &str = "Anthropic";
     const MENU_CODEX: &str = "Codex / ChatGPT (OAuth)";
-    const MENU_ANTIGRAVITY: &str = "Antigravity / Google (OAuth)";
-
-    let show_antigravity = std::env::var("CLAWSHELL_ONBOARD_SHOW_ANTIGRAVITY_OAUTH")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false);
-    let all_options = if show_antigravity {
-        vec![
-            MENU_OPENAI,
-            MENU_OPENROUTER,
-            MENU_ANTHROPIC,
-            MENU_CODEX,
-            MENU_ANTIGRAVITY,
-        ]
-    } else {
-        vec![MENU_OPENAI, MENU_OPENROUTER, MENU_ANTHROPIC, MENU_CODEX]
-    };
+    let all_options = [MENU_OPENAI, MENU_OPENROUTER, MENU_ANTHROPIC, MENU_CODEX];
 
     // Reorder so the existing choice appears first
     let preferred = match (
@@ -459,7 +437,6 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
         existing.oauth_provider.as_deref(),
         existing.provider.as_deref(),
     ) {
-        (Some("oauth"), Some("antigravity"), _) if show_antigravity => Some(MENU_ANTIGRAVITY),
         (Some("oauth"), Some("codex"), _) | (Some("oauth"), _, _) => Some(MENU_CODEX),
         (_, _, Some("anthropic")) => Some(MENU_ANTHROPIC),
         (_, _, Some("openrouter")) => Some(MENU_OPENROUTER),
@@ -471,7 +448,7 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
             .chain(all_options.iter().copied().filter(|o| *o != first))
             .collect()
     } else {
-        all_options
+        all_options.to_vec()
     };
 
     let provider_choice = tui::prompt_select("Select a model provider", provider_options)?;
@@ -485,12 +462,6 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
                 provider_id: "codex".to_string(),
             },
         ),
-        MENU_ANTIGRAVITY => (
-            "openai".to_string(),
-            OnboardAuthMethod::OAuth {
-                provider_id: "antigravity".to_string(),
-            },
-        ),
         _ => ("openai".to_string(), OnboardAuthMethod::StaticKey),
     };
 
@@ -499,7 +470,6 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
         MENU_ANTHROPIC => "claude-sonnet-4-5-20250929",
         MENU_OPENROUTER => "openrouter/auto",
         MENU_CODEX => "gpt-5.2-chat-latest",
-        MENU_ANTIGRAVITY => "gemini-2.0-flash",
         _ => "gpt-5.2-chat-latest", // OpenAI default
     });
     let model = tui::prompt_text("Enter the model name", Some(default_model))?;

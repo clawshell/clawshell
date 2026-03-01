@@ -110,7 +110,7 @@ pub struct KeyMapping {
     /// Authentication method for this key. Defaults to "static".
     #[serde(default)]
     pub auth: KeyAuthMethod,
-    /// Which OAuth provider supplies the token (e.g. "codex", "antigravity").
+    /// Which OAuth provider supplies the token (e.g. "codex").
     /// Required when auth = "oauth".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_provider: Option<String>,

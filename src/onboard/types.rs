@@ -49,7 +49,7 @@ pub enum OnboardAuthMethod {
     StaticKey,
     /// OAuth provider supplies access tokens at runtime.
     OAuth {
-        /// Provider identifier, e.g. "codex", "antigravity".
+        /// Provider identifier, e.g. "codex".
         provider_id: String,
     },
 }

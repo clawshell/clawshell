@@ -1,7 +1,6 @@
 mod storage;
 
 pub mod codex;
-pub mod antigravity;
 
 pub use storage::TokenStorage;
 
@@ -86,10 +85,10 @@ impl OAuthTokens {
 /// The core trait that each OAuth provider implements.
 #[async_trait]
 pub trait OAuthProvider: Send + Sync + fmt::Debug {
-    /// Unique identifier (e.g., "codex", "antigravity").
+    /// Unique identifier (e.g., "codex").
     fn id(&self) -> &str;
 
-    /// Display name (e.g., "Codex (OpenAI)", "Antigravity (Google)").
+    /// Display name (e.g., "Codex (OpenAI)").
     fn display_name(&self) -> &str;
 
     /// Execute browser-based OAuth login flow.
@@ -105,7 +104,7 @@ pub trait OAuthProvider: Send + Sync + fmt::Debug {
     fn inject_auth(&self, headers: &mut HeaderMap, access_token: &str) -> Result<(), OAuthError>;
 
     /// Optionally transform the request body for provider-specific formats.
-    /// Returns None for pass-through (Codex); Some(wrapped) for Antigravity.
+    /// Returns None for pass-through (Codex).
     fn prepare_request_body(
         &self,
         _body: &[u8],

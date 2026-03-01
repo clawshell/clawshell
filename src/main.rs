@@ -630,7 +630,6 @@ async fn build_oauth_registry(
 ) -> Result<crate::oauth::OAuthRegistry, Box<dyn std::error::Error>> {
     use crate::oauth::{
         OAuthRegistry, TokenStorage,
-        antigravity::AntigravityProvider,
         codex::CodexProvider,
     };
     use std::sync::Arc;
@@ -645,10 +644,6 @@ async fn build_oauth_registry(
         match provider_config.provider.as_str() {
             "codex" => {
                 let provider = CodexProvider::from_config(provider_config);
-                registry.register(Arc::new(provider));
-            }
-            "antigravity" => {
-                let provider = AntigravityProvider::from_config(provider_config);
                 registry.register(Arc::new(provider));
             }
             other => {
