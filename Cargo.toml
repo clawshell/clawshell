@@ -18,7 +18,7 @@ serde_json = "1.0.149"
 toml = "1.0.6"
 regex = "1.12.3"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 tower-http = { version = "0.6.8", features = ["trace"] }
 http = "1.4"
 http-body-util = "0.1.3"
