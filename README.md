@@ -41,12 +41,20 @@ ClawShell supports sender-based email filtering so each virtual key only sees ma
 - **Key Isolation**: IMAP credentials are stored in `/etc/clawshell/clawshell.toml`, readable only by the `clawshell` system user. OpenClaw holds only virtual keys.
 - **Provider Support**: Built-in Gmail and Outlook presets, with manual IMAP setup for other providers.
 
-### 4. Seamless Integration
+### 4. OAuth Authentication (Codex / ChatGPT)
+
+ClawShell supports OAuth-based authentication as an alternative to static API keys.
+
+- **Device Code Flow**: Log in via a one-time code — no browser required on the server. The onboard wizard prints a URL and code; authorize from any device.
+- **Automatic Token Refresh**: Access tokens are refreshed transparently before they expire.
+- **Request Translation**: Automatically translates OpenAI Chat Completions API requests to the ChatGPT Responses API format when using Codex OAuth.
+
+### 5. Seamless Integration
 
 - **Drop-in Sidecar**: Deploys alongside OpenClaw without requiring re-install — the `clawshell onboard` command automatically configures OpenClaw to point at ClawShell's address and forwards all requests upstream.
 - **No External Dependencies**: Uses Unix file system permissions to protect secrets. No IdP, Vault, or external key management service required.
 
-### 5. Ultra Lightweight and Scalable
+### 6. Ultra Lightweight and Scalable
 
 - Runs in under 10MB of memory.
 - Written in Rust with Tokio.
@@ -173,6 +181,12 @@ sudo clawshell migrate-config
 
 By default ClawShell listens on `127.0.0.1:18790`.
 
+You can override the bind address at runtime with environment variables:
+
+```bash
+CLAWSHELL_SERVER_HOST=0.0.0.0 CLAWSHELL_SERVER_PORT=17890 clawshell start --foreground
+```
+
 ### Customized Configuration
 
 ClawShell reads its config from `/etc/clawshell/clawshell.toml`. You can view or edit it with:
@@ -235,6 +249,43 @@ imap_port = 993
 # Outlook preset example:
 # imap_host = "imap-mail.outlook.com"
 ```
+
+### OAuth Authentication (Codex / ChatGPT)
+
+Instead of a static API key, you can authenticate via OAuth using your ChatGPT / Codex account.
+
+#### Setup via onboard
+
+During `sudo clawshell onboard`, select **"Codex / ChatGPT (OAuth)"** as the provider. The wizard will start a device code flow:
+
+1. A URL and one-time code are printed to the terminal.
+2. Open the URL on any device and enter the code.
+3. Once authorized, tokens are saved automatically to `/etc/clawshell/oauth/`.
+
+No browser is required on the server.
+
+#### Manual configuration
+
+To configure OAuth manually in `clawshell.toml`:
+
+```toml
+# OAuth-backed key — no real_key needed
+[[keys]]
+virtual_key = "vk-codex-001"
+auth = "oauth"
+oauth_provider = "codex"
+provider = "openai"
+
+# OAuth provider definition
+[[oauth_providers]]
+provider = "codex"
+# Optional overrides (defaults work for ChatGPT):
+# client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
+# auth_url = "https://auth.openai.com/authorize"
+# token_url = "https://auth.openai.com/oauth/token"
+```
+
+ClawShell handles token refresh automatically. When using Codex OAuth, requests to `/v1/chat/completions` are translated to the ChatGPT Responses API format and routed to `chatgpt.com/backend-api/codex`.
 
 If `start`, `restart`, `stop`, `config --edit`, `onboard`, or `uninstall` reports that migration is required, run:
 

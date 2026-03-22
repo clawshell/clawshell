@@ -1,4 +1,4 @@
-use super::types::{OnboardConfig, OnboardEmailMode};
+use super::types::{OnboardAuthMethod, OnboardConfig, OnboardEmailMode};
 
 /// Return the default OpenClaw config path.
 pub fn default_openclaw_config_path() -> String {
@@ -11,6 +11,47 @@ pub fn default_openclaw_config_path() -> String {
 
 /// Generate the ClawShell TOML configuration content with the given key mapping.
 pub fn generate_clawshell_config(config: &OnboardConfig) -> String {
+    let key_section = match &config.auth_method {
+        OnboardAuthMethod::OAuth { provider_id } => {
+            format!(
+                r#"[[keys]]
+virtual_key = {virtual_key}
+provider = {provider}
+auth = "oauth"
+oauth_provider = {oauth_provider}
+"#,
+                virtual_key = toml_string(&config.virtual_api_key),
+                provider = toml_string(&config.provider),
+                oauth_provider = toml_string(provider_id),
+            )
+        }
+        OnboardAuthMethod::StaticKey => {
+            format!(
+                r#"[[keys]]
+virtual_key = {virtual_key}
+real_key = {real_key}
+provider = {provider}
+"#,
+                virtual_key = toml_string(&config.virtual_api_key),
+                real_key = toml_string(&config.real_api_key),
+                provider = toml_string(&config.provider),
+            )
+        }
+    };
+
+    let oauth_providers_section = match &config.auth_method {
+        OnboardAuthMethod::OAuth { provider_id } => {
+            format!(
+                r#"
+[[oauth_providers]]
+provider = {provider_id}
+"#,
+                provider_id = toml_string(provider_id),
+            )
+        }
+        OnboardAuthMethod::StaticKey => String::new(),
+    };
+
     let mut output = format!(
         r#"# ClawShell Configuration
 version = "{version}"
@@ -25,11 +66,7 @@ openai_base_url = "https://api.openai.com"
 openrouter_base_url = "https://openrouter.ai/api"
 anthropic_base_url = "https://api.anthropic.com"
 
-[[keys]]
-virtual_key = {virtual_key}
-real_key = {real_key}
-provider = {provider}
-[dlp]
+{key_section}[dlp]
 scan_responses = true
 patterns = [
     {{ name = "ssn",             regex = '\\b\\d{{3}}-\\d{{2}}-\\d{{4}}\\b',                                             action = "redact" }},
@@ -38,13 +75,12 @@ patterns = [
     {{ name = "mastercard",      regex = '\\b5[1-5][0-9]{{14}}\\b',                                                  action = "redact" }},
     {{ name = "amex_card",       regex = '\\b3[47][0-9]{{13}}\\b',                                                   action = "redact" }},
 ]
-"#,
+{oauth_providers_section}"#,
         version = env!("CARGO_PKG_VERSION"),
         host = config.server_host,
         port = config.server_port,
-        virtual_key = toml_string(&config.virtual_api_key),
-        real_key = toml_string(&config.real_api_key),
-        provider = toml_string(&config.provider),
+        key_section = key_section,
+        oauth_providers_section = oauth_providers_section,
     );
 
     if let Some(email) = &config.email {

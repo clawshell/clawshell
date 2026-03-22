@@ -9,11 +9,14 @@ mod dlp;
 mod email;
 mod keys;
 mod migration;
+#[allow(dead_code)]
+mod oauth;
 mod onboard;
 mod openclaw_cli;
 mod platform;
 mod process;
 mod proxy;
+mod translate;
 mod tui;
 
 use clap::Parser;
@@ -555,7 +558,10 @@ async fn cmd_start_inner(config_path: &str) -> Result<(), Box<dyn std::error::Er
     ensure_config_migrated(&path)?;
     let config = Config::from_file(&path)
         .map_err(|e| format!("Failed to load configuration from '{}': {}", config_path, e))?;
-    let app_state = AppState::from_config(&config)
+
+    // Build OAuth registry if any OAuth providers are configured
+    let oauth_registry = build_oauth_registry(&config).await?;
+    let app_state = AppState::from_config_with_registry(&config, Some(oauth_registry))
         .map_err(|e| format!("Failed to initialize app state: {e}"))?;
 
     tui::print_success("Configuration validated successfully.");
@@ -572,10 +578,15 @@ async fn cmd_start_inner(config_path: &str) -> Result<(), Box<dyn std::error::Er
         .with_target(true)
         .init();
 
+    let listen_addr = config
+        .resolved_listen_addr()
+        .map_err(|e| format!("invalid server environment override: {e}"))?;
+
     info!(
-        listen = config.listen_addr(),
+        listen = %listen_addr,
         upstream = config.upstream.openai_base_url,
         keys = config.keys.len(),
+        oauth_providers = config.oauth_providers.len(),
         "ClawShell starting"
     );
     debug!(
@@ -585,7 +596,11 @@ async fn cmd_start_inner(config_path: &str) -> Result<(), Box<dyn std::error::Er
         "Configuration loaded"
     );
 
-    let addr: SocketAddr = config.listen_addr().parse()?;
+    // Spawn background OAuth refresh tasks
+    let cancel = tokio_util::sync::CancellationToken::new();
+    app_state.oauth_registry.spawn_refresh_tasks(cancel.clone());
+
+    let addr: SocketAddr = listen_addr.parse()?;
     let app = build_router(app_state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("Listening on {}", addr);
@@ -605,8 +620,39 @@ async fn cmd_start_inner(config_path: &str) -> Result<(), Box<dyn std::error::Er
         })
         .await?;
 
+    cancel.cancel();
     info!("ClawShell shut down");
     Ok(())
+}
+
+async fn build_oauth_registry(
+    config: &Config,
+) -> Result<crate::oauth::OAuthRegistry, Box<dyn std::error::Error>> {
+    use crate::oauth::{OAuthRegistry, TokenStorage, codex::CodexProvider};
+    use std::sync::Arc;
+
+    let storage = TokenStorage::new(PathBuf::from("/etc/clawshell/oauth"));
+    let mut registry = OAuthRegistry::new(storage);
+
+    for provider_config in &config.oauth_providers {
+        if !provider_config.enabled {
+            continue;
+        }
+        match provider_config.provider.as_str() {
+            "codex" => {
+                let provider = CodexProvider::from_config(provider_config);
+                registry.register(Arc::new(provider));
+            }
+            other => {
+                return Err(format!("Unknown OAuth provider type: '{other}'").into());
+            }
+        }
+    }
+
+    // Load persisted tokens from disk
+    registry.load_tokens().await?;
+
+    Ok(registry)
 }
 
 fn cmd_stop() -> Result<(), Box<dyn std::error::Error>> {
@@ -1051,13 +1097,27 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     let toml_content = onboard::generate_clawshell_config(&ob_config);
     std::fs::write(&toml_config_path, &toml_content)?;
 
-    let config_json = serde_json::json!({
-        "real_api_key": ob_config.real_api_key,
-        "virtual_api_key": ob_config.virtual_api_key,
-        "provider": ob_config.provider,
-        "model": ob_config.model,
-        "openclaw_config_path": ob_config.openclaw_config_path.to_string_lossy(),
-    });
+    let config_json = match &ob_config.auth_method {
+        crate::onboard::OnboardAuthMethod::OAuth { provider_id } => {
+            serde_json::json!({
+                "auth_method": "oauth",
+                "oauth_provider": provider_id,
+                "virtual_api_key": ob_config.virtual_api_key,
+                "provider": ob_config.provider,
+                "model": ob_config.model,
+                "openclaw_config_path": ob_config.openclaw_config_path.to_string_lossy(),
+            })
+        }
+        crate::onboard::OnboardAuthMethod::StaticKey => {
+            serde_json::json!({
+                "real_api_key": ob_config.real_api_key,
+                "virtual_api_key": ob_config.virtual_api_key,
+                "provider": ob_config.provider,
+                "model": ob_config.model,
+                "openclaw_config_path": ob_config.openclaw_config_path.to_string_lossy(),
+            })
+        }
+    };
     std::fs::write(&config_file, serde_json::to_string_pretty(&config_json)?)?;
 
     // Set permissions on config files

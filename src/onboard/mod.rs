@@ -29,4 +29,7 @@ pub use managed_skills::{
 };
 pub use openclaw_json::{patch_openclaw_config_for_clawshell, remove_clawshell_openclaw_entries};
 pub use skills::{render_openclaw_email_messages_skill, should_setup_openclaw_email_skill};
-pub use types::{OPENCLAW_EMAIL_MESSAGES_SKILL_NAME, OnboardConfig, OpenclawFileRemovalPreview};
+pub use types::{
+    OPENCLAW_EMAIL_MESSAGES_SKILL_NAME, OnboardAuthMethod, OnboardConfig,
+    OpenclawFileRemovalPreview,
+};

@@ -41,11 +41,26 @@ pub struct OpenclawFileRemovalPreview {
     pub removals: Vec<String>,
 }
 
+/// Authentication method chosen during onboarding.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum OnboardAuthMethod {
+    /// Static API key (the traditional approach).
+    #[default]
+    StaticKey,
+    /// OAuth provider supplies access tokens at runtime.
+    OAuth {
+        /// Provider identifier, e.g. "codex".
+        provider_id: String,
+    },
+}
+
 /// Collected onboarding configuration from user prompts.
 #[derive(Debug, Clone)]
 pub struct OnboardConfig {
     pub provider: String,
     pub model: String,
+    pub auth_method: OnboardAuthMethod,
+    /// Set for `StaticKey`; empty for `OAuth`.
     pub real_api_key: String,
     pub virtual_api_key: String,
     pub openclaw_config_path: PathBuf,

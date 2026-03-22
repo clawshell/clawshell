@@ -16,7 +16,8 @@ use crate::email::{
     EmailAccountCredentials, EmailListMessagesResponse, EmailMessageContent, EmailMessageMetadata,
     EmailPolicy, EmailService,
 };
-use crate::keys::{KeyManager, ResolvedKey};
+use crate::keys::{KeyManager, KeySource, ResolvedKey};
+use crate::oauth::OAuthRegistry;
 use crate::proxy::ProxyClient;
 
 fn make_app(upstream_url: &str) -> axum::Router {
@@ -24,14 +25,18 @@ fn make_app(upstream_url: &str) -> axum::Router {
     key_map.insert(
         "vk-test-1".to_string(),
         ResolvedKey {
-            real_key: "sk-real-1".to_string(),
+            source: KeySource::Static {
+                real_key: "sk-real-1".to_string(),
+            },
             provider: Provider::Openai,
         },
     );
     key_map.insert(
         "vk-test-2".to_string(),
         ResolvedKey {
-            real_key: "sk-real-2".to_string(),
+            source: KeySource::Static {
+                real_key: "sk-real-2".to_string(),
+            },
             provider: Provider::Openai,
         },
     );
@@ -65,6 +70,7 @@ fn make_app(upstream_url: &str) -> axum::Router {
             upstream_urls,
             "2023-06-01".to_string(),
         )),
+        oauth_registry: Arc::new(OAuthRegistry::new(Default::default())),
         email_enabled: false,
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
@@ -79,14 +85,18 @@ fn make_app_with_anthropic(upstream_url: &str) -> axum::Router {
     key_map.insert(
         "vk-test-1".to_string(),
         ResolvedKey {
-            real_key: "sk-real-1".to_string(),
+            source: KeySource::Static {
+                real_key: "sk-real-1".to_string(),
+            },
             provider: Provider::Openai,
         },
     );
     key_map.insert(
         "vk-ant-1".to_string(),
         ResolvedKey {
-            real_key: "sk-ant-real-1".to_string(),
+            source: KeySource::Static {
+                real_key: "sk-ant-real-1".to_string(),
+            },
             provider: Provider::Anthropic,
         },
     );
@@ -102,6 +112,7 @@ fn make_app_with_anthropic(upstream_url: &str) -> axum::Router {
             upstream_urls,
             "2023-06-01".to_string(),
         )),
+        oauth_registry: Arc::new(OAuthRegistry::new(Default::default())),
         email_enabled: false,
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
@@ -561,7 +572,10 @@ real_key = "sk-real-1"
     let config = Config::parse(toml_str).unwrap();
     let state = AppState::from_config(&config).unwrap();
     let resolved = state.key_manager.resolve("vk-1").unwrap();
-    assert_eq!(resolved.real_key, "sk-real-1");
+    match &resolved.source {
+        KeySource::Static { real_key } => assert_eq!(real_key, "sk-real-1"),
+        _ => panic!("expected Static key source"),
+    }
     assert_eq!(resolved.provider, Provider::Openai);
     assert!(state.key_manager.resolve("vk-unknown").is_none());
 }
@@ -587,10 +601,16 @@ provider = "anthropic"
     let config = Config::parse(toml_str).unwrap();
     let state = AppState::from_config(&config).unwrap();
     let oai = state.key_manager.resolve("vk-oai").unwrap();
-    assert_eq!(oai.real_key, "sk-oai-key");
+    match &oai.source {
+        KeySource::Static { real_key } => assert_eq!(real_key, "sk-oai-key"),
+        _ => panic!("expected Static key source"),
+    }
     assert_eq!(oai.provider, Provider::Openai);
     let ant = state.key_manager.resolve("vk-ant").unwrap();
-    assert_eq!(ant.real_key, "sk-ant-key");
+    match &ant.source {
+        KeySource::Static { real_key } => assert_eq!(real_key, "sk-ant-key"),
+        _ => panic!("expected Static key source"),
+    }
     assert_eq!(ant.provider, Provider::Anthropic);
 }
 
@@ -664,7 +684,9 @@ async fn test_proxy_error_on_unreachable_upstream() {
             [(
                 "vk-1".to_string(),
                 ResolvedKey {
-                    real_key: "sk-1".to_string(),
+                    source: KeySource::Static {
+                        real_key: "sk-1".to_string(),
+                    },
                     provider: Provider::Openai,
                 },
             )]
@@ -681,6 +703,7 @@ async fn test_proxy_error_on_unreachable_upstream() {
             },
             "2023-06-01".to_string(),
         )),
+        oauth_registry: Arc::new(OAuthRegistry::new(Default::default())),
         email_enabled: false,
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
@@ -803,7 +826,9 @@ async fn test_anthropic_dlp_blocks_sensitive_data() {
     key_map.insert(
         "vk-ant-dlp".to_string(),
         ResolvedKey {
-            real_key: "sk-ant-key".to_string(),
+            source: KeySource::Static {
+                real_key: "sk-ant-key".to_string(),
+            },
             provider: Provider::Anthropic,
         },
     );
@@ -825,6 +850,7 @@ async fn test_anthropic_dlp_blocks_sensitive_data() {
             upstream_urls,
             "2023-06-01".to_string(),
         )),
+        oauth_registry: Arc::new(OAuthRegistry::new(Default::default())),
         email_enabled: false,
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
@@ -898,14 +924,18 @@ async fn test_openai_and_openrouter_keys_map_to_distinct_real_keys() {
     key_map.insert(
         "vk-openai".to_string(),
         ResolvedKey {
-            real_key: "sk-openai-real".to_string(),
+            source: KeySource::Static {
+                real_key: "sk-openai-real".to_string(),
+            },
             provider: Provider::Openai,
         },
     );
     key_map.insert(
         "vk-openrouter".to_string(),
         ResolvedKey {
-            real_key: "sk-openrouter-real".to_string(),
+            source: KeySource::Static {
+                real_key: "sk-openrouter-real".to_string(),
+            },
             provider: Provider::Openrouter,
         },
     );
@@ -922,6 +952,7 @@ async fn test_openai_and_openrouter_keys_map_to_distinct_real_keys() {
             upstream_urls,
             "2023-06-01".to_string(),
         )),
+        oauth_registry: Arc::new(OAuthRegistry::new(Default::default())),
         email_enabled: false,
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
@@ -956,7 +987,9 @@ fn make_app_with_redact(upstream_url: &str) -> axum::Router {
     key_map.insert(
         "vk-test-1".to_string(),
         ResolvedKey {
-            real_key: "sk-real-1".to_string(),
+            source: KeySource::Static {
+                real_key: "sk-real-1".to_string(),
+            },
             provider: Provider::Openai,
         },
     );
@@ -990,6 +1023,7 @@ fn make_app_with_redact(upstream_url: &str) -> axum::Router {
             upstream_urls,
             "2023-06-01".to_string(),
         )),
+        oauth_registry: Arc::new(OAuthRegistry::new(Default::default())),
         email_enabled: false,
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
@@ -1175,7 +1209,9 @@ async fn test_response_dlp_disabled() {
     key_map.insert(
         "vk-test-1".to_string(),
         ResolvedKey {
-            real_key: "sk-real-1".to_string(),
+            source: KeySource::Static {
+                real_key: "sk-real-1".to_string(),
+            },
             provider: Provider::Openai,
         },
     );
@@ -1194,6 +1230,7 @@ async fn test_response_dlp_disabled() {
             upstream_urls,
             "2023-06-01".to_string(),
         )),
+        oauth_registry: Arc::new(OAuthRegistry::new(Default::default())),
         email_enabled: false,
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
@@ -1442,8 +1479,7 @@ async fn test_non_utf8_body_passes_through() {
 async fn test_streaming_response_with_dlp_enabled_passes_through() {
     let mock_server = MockServer::start().await;
 
-    // SSE response — should pass through when DLP scanning is enabled
-    // because streaming responses cannot be scanned (exercises lib.rs lines 261-268)
+    // SSE response with clean content — should pass through DLP scanning unchanged
     let sse_body = "data: {\"content\":\"hello world\"}\n\ndata: [DONE]\n\n";
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -1484,6 +1520,63 @@ async fn test_streaming_response_with_dlp_enabled_passes_through() {
     assert!(body_str.contains("[DONE]"));
 }
 
+#[tokio::test]
+async fn test_streaming_response_dlp_redacts_pii_in_sse() {
+    let mock_server = MockServer::start().await;
+
+    // SSE response with PII in delta.content — DLP should redact it
+    let chunk = serde_json::json!({
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "choices": [{
+            "index": 0,
+            "delta": { "content": "Contact user@example.com for help" },
+            "finish_reason": null,
+        }]
+    });
+    let sse_body = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        serde_json::to_string(&chunk).unwrap()
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(sse_body, "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let app = make_app_with_redact(&mock_server.uri());
+    let body = r#"{"model":"gpt-4","stream":true,"messages":[{"role":"user","content":"Hi"}]}"#;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk-test-1")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let body_str = std::str::from_utf8(&body).unwrap();
+    assert!(
+        body_str.contains("[REDACTED:email]"),
+        "PII should be redacted in streaming SSE"
+    );
+    assert!(
+        !body_str.contains("user@example.com"),
+        "Original email should be gone"
+    );
+    assert!(
+        body_str.contains("[DONE]"),
+        "Stream should still end with [DONE]"
+    );
+}
+
 fn make_email_app(
     policy: EmailPolicy,
     email_accounts: BTreeMap<String, EmailAccountCredentials>,
@@ -1500,6 +1593,7 @@ fn make_email_app(
             upstream_urls,
             "2023-06-01".to_string(),
         )),
+        oauth_registry: Arc::new(OAuthRegistry::new(Default::default())),
         email_enabled: true,
         email_policy: Some(policy),
         email_accounts: Arc::new(email_accounts),

@@ -4,8 +4,14 @@ use std::collections::BTreeMap;
 use tracing::{debug, trace};
 
 #[derive(Debug, Clone)]
+pub enum KeySource {
+    Static { real_key: String },
+    OAuth { provider_id: String },
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolvedKey {
-    pub real_key: String,
+    pub source: KeySource,
     pub provider: Provider,
 }
 
@@ -58,14 +64,16 @@ impl KeyManager {
 mod tests {
     use super::*;
 
-    fn make_map(entries: Vec<(&str, &str, Provider)>) -> BTreeMap<String, ResolvedKey> {
+    fn make_static_map(entries: Vec<(&str, &str, Provider)>) -> BTreeMap<String, ResolvedKey> {
         entries
             .into_iter()
             .map(|(vk, rk, p)| {
                 (
                     vk.to_string(),
                     ResolvedKey {
-                        real_key: rk.to_string(),
+                        source: KeySource::Static {
+                            real_key: rk.to_string(),
+                        },
                         provider: p,
                     },
                 )
@@ -93,10 +101,13 @@ mod tests {
 
     #[test]
     fn test_resolve_existing_key() {
-        let map = make_map(vec![("vk-1", "sk-real-1", Provider::Openai)]);
+        let map = make_static_map(vec![("vk-1", "sk-real-1", Provider::Openai)]);
         let km = KeyManager::new(map);
         let resolved = km.resolve("vk-1").unwrap();
-        assert_eq!(resolved.real_key, "sk-real-1");
+        match &resolved.source {
+            KeySource::Static { real_key } => assert_eq!(real_key, "sk-real-1"),
+            KeySource::OAuth { .. } => panic!("expected Static"),
+        }
         assert_eq!(resolved.provider, Provider::Openai);
     }
 
@@ -108,21 +119,51 @@ mod tests {
 
     #[test]
     fn test_multiple_virtual_to_same_real() {
-        let map = make_map(vec![
+        let map = make_static_map(vec![
             ("vk-1", "sk-shared", Provider::Openai),
             ("vk-2", "sk-shared", Provider::Openai),
         ]);
         let km = KeyManager::new(map);
-        assert_eq!(km.resolve("vk-1").unwrap().real_key, "sk-shared");
-        assert_eq!(km.resolve("vk-2").unwrap().real_key, "sk-shared");
+        match &km.resolve("vk-1").unwrap().source {
+            KeySource::Static { real_key } => assert_eq!(real_key, "sk-shared"),
+            _ => panic!("expected Static"),
+        }
+        match &km.resolve("vk-2").unwrap().source {
+            KeySource::Static { real_key } => assert_eq!(real_key, "sk-shared"),
+            _ => panic!("expected Static"),
+        }
     }
 
     #[test]
     fn test_resolve_anthropic_provider() {
-        let map = make_map(vec![("vk-ant", "sk-ant-key", Provider::Anthropic)]);
+        let map = make_static_map(vec![("vk-ant", "sk-ant-key", Provider::Anthropic)]);
         let km = KeyManager::new(map);
         let resolved = km.resolve("vk-ant").unwrap();
-        assert_eq!(resolved.real_key, "sk-ant-key");
+        match &resolved.source {
+            KeySource::Static { real_key } => assert_eq!(real_key, "sk-ant-key"),
+            _ => panic!("expected Static"),
+        }
         assert_eq!(resolved.provider, Provider::Anthropic);
+    }
+
+    #[test]
+    fn test_resolve_oauth_key() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "vk-oauth".to_string(),
+            ResolvedKey {
+                source: KeySource::OAuth {
+                    provider_id: "codex".to_string(),
+                },
+                provider: Provider::Openai,
+            },
+        );
+        let km = KeyManager::new(map);
+        let resolved = km.resolve("vk-oauth").unwrap();
+        match &resolved.source {
+            KeySource::OAuth { provider_id } => assert_eq!(provider_id, "codex"),
+            _ => panic!("expected OAuth"),
+        }
+        assert_eq!(resolved.provider, Provider::Openai);
     }
 }

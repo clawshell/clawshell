@@ -6,6 +6,7 @@ pub(super) fn test_config() -> OnboardConfig {
     OnboardConfig {
         provider: "openai".to_string(),
         model: "gpt-5.2".to_string(),
+        auth_method: super::types::OnboardAuthMethod::StaticKey,
         real_api_key: "sk-real-key-123".to_string(),
         virtual_api_key: "{clawshell-virtual-key-openai}".to_string(),
         openclaw_config_path: PathBuf::from("/tmp/test-openclaw.json"),

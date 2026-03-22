@@ -1,6 +1,7 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::env::VarError;
 use std::path::Path;
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,6 +38,8 @@ pub struct Config {
     pub email: EmailConfig,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oauth_providers: Vec<crate::oauth::OAuthProviderConfig>,
 }
 
 fn default_log_level() -> String {
@@ -60,6 +63,9 @@ fn default_port() -> u16 {
     18790
 }
 
+const SERVER_HOST_ENV: &str = "CLAWSHELL_SERVER_HOST";
+const SERVER_PORT_ENV: &str = "CLAWSHELL_SERVER_PORT";
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct UpstreamConfig {
@@ -81,13 +87,33 @@ fn default_openai_base_url() -> String {
     "https://api.openai.com".to_string()
 }
 
+/// How a key mapping authenticates: static API key or OAuth provider.
+#[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyAuthMethod {
+    /// Static API key (the default, existing behavior).
+    #[default]
+    Static,
+    /// OAuth provider supplies the access token at runtime.
+    OAuth,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct KeyMapping {
     pub virtual_key: String,
-    pub real_key: String,
+    /// Required when auth = "static" (or omitted). Optional when auth = "oauth".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub real_key: Option<String>,
     #[serde(default)]
     pub provider: Provider,
+    /// Authentication method for this key. Defaults to "static".
+    #[serde(default)]
+    pub auth: KeyAuthMethod,
+    /// Which OAuth provider supplies the token (e.g. "codex").
+    /// Required when auth = "oauth".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_provider: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -220,7 +246,51 @@ impl Config {
             Regex::new(&pattern.regex)
                 .map_err(|e| format!("Invalid DLP regex for '{}': {}", pattern.name, e))?;
         }
+        self.validate_keys()?;
         self.validate_email()?;
+        Ok(())
+    }
+
+    fn validate_keys(&self) -> Result<(), Box<dyn std::error::Error>> {
+        for key in &self.keys {
+            match key.auth {
+                KeyAuthMethod::Static => {
+                    if key.real_key.is_none() {
+                        return Err(format!(
+                            "key '{}': real_key is required when auth = \"static\"",
+                            key.virtual_key
+                        )
+                        .into());
+                    }
+                }
+                KeyAuthMethod::OAuth => {
+                    if key
+                        .oauth_provider
+                        .as_ref()
+                        .is_none_or(|p| p.trim().is_empty())
+                    {
+                        return Err(format!(
+                            "key '{}': oauth_provider is required when auth = \"oauth\"",
+                            key.virtual_key
+                        )
+                        .into());
+                    }
+                    // Verify the referenced OAuth provider exists in config
+                    let provider_id = key.oauth_provider.as_ref().unwrap();
+                    if !self
+                        .oauth_providers
+                        .iter()
+                        .any(|p| p.provider == *provider_id)
+                    {
+                        return Err(format!(
+                            "key '{}': oauth_provider '{}' not found in [[oauth_providers]]",
+                            key.virtual_key, provider_id
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -315,10 +385,32 @@ impl Config {
         Ok(())
     }
 
+    /// Returns a map of static key mappings: virtual_key → (real_key, provider).
+    /// OAuth-backed keys are excluded.
+    #[allow(dead_code)]
     pub fn key_map(&self) -> BTreeMap<String, (String, Provider)> {
         self.keys
             .iter()
-            .map(|k| (k.virtual_key.clone(), (k.real_key.clone(), k.provider)))
+            .filter(|k| k.auth == KeyAuthMethod::Static)
+            .filter_map(|k| {
+                k.real_key
+                    .clone()
+                    .map(|rk| (k.virtual_key.clone(), (rk, k.provider)))
+            })
+            .collect()
+    }
+
+    /// Returns a map of OAuth key mappings: virtual_key → (oauth_provider_id, provider).
+    #[allow(dead_code)]
+    pub fn oauth_key_map(&self) -> BTreeMap<String, (String, Provider)> {
+        self.keys
+            .iter()
+            .filter(|k| k.auth == KeyAuthMethod::OAuth)
+            .filter_map(|k| {
+                k.oauth_provider
+                    .clone()
+                    .map(|op| (k.virtual_key.clone(), (op, k.provider)))
+            })
             .collect()
     }
 
@@ -340,6 +432,60 @@ impl Config {
 
     pub fn listen_addr(&self) -> String {
         format!("{}:{}", self.server.host, self.server.port)
+    }
+
+    pub fn resolved_listen_addr(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let host = resolve_server_host_override(&self.server.host)?;
+        let port = resolve_server_port_override(self.server.port)?;
+        Ok(format!("{host}:{port}"))
+    }
+}
+
+fn resolve_server_host_override(default_host: &str) -> Result<String, Box<dyn std::error::Error>> {
+    resolve_server_host_override_from_var(default_host, std::env::var(SERVER_HOST_ENV))
+}
+
+fn resolve_server_host_override_from_var(
+    default_host: &str,
+    env_value: Result<String, VarError>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match env_value {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(format!("{SERVER_HOST_ENV} cannot be empty").into());
+            }
+            Ok(trimmed.to_string())
+        }
+        Err(VarError::NotPresent) => Ok(default_host.to_string()),
+        Err(VarError::NotUnicode(_)) => {
+            Err(format!("{SERVER_HOST_ENV} must be valid UTF-8").into())
+        }
+    }
+}
+
+fn resolve_server_port_override(default_port: u16) -> Result<u16, Box<dyn std::error::Error>> {
+    resolve_server_port_override_from_var(default_port, std::env::var(SERVER_PORT_ENV))
+}
+
+fn resolve_server_port_override_from_var(
+    default_port: u16,
+    env_value: Result<String, VarError>,
+) -> Result<u16, Box<dyn std::error::Error>> {
+    match env_value {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(format!("{SERVER_PORT_ENV} cannot be empty").into());
+            }
+            trimmed.parse::<u16>().map_err(|_| {
+                format!("{SERVER_PORT_ENV} must be a valid port (0-65535), got '{trimmed}'").into()
+            })
+        }
+        Err(VarError::NotPresent) => Ok(default_port),
+        Err(VarError::NotUnicode(_)) => {
+            Err(format!("{SERVER_PORT_ENV} must be valid UTF-8").into())
+        }
     }
 }
 
@@ -848,6 +994,66 @@ imap_port = 0
         assert!(
             err.to_string()
                 .contains("email.accounts[].imap_port must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn test_resolved_listen_addr_uses_config_without_env() {
+        let cfg = r#"
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[upstream]
+openai_base_url = "https://api.openai.com"
+"#;
+        let parsed = Config::parse(cfg).expect("config should parse");
+        assert_eq!(parsed.listen_addr(), "127.0.0.1:3000");
+    }
+
+    #[test]
+    fn test_resolve_server_host_override_uses_default_when_unset() {
+        let host = resolve_server_host_override_from_var("127.0.0.1", Err(VarError::NotPresent))
+            .expect("host should use default");
+        assert_eq!(host, "127.0.0.1");
+    }
+
+    #[test]
+    fn test_resolve_server_host_override_accepts_env() {
+        let host = resolve_server_host_override_from_var("127.0.0.1", Ok("0.0.0.0".to_string()))
+            .expect("host override should be accepted");
+        assert_eq!(host, "0.0.0.0");
+    }
+
+    #[test]
+    fn test_resolve_server_host_override_rejects_empty_env() {
+        let err =
+            resolve_server_host_override_from_var("127.0.0.1", Ok("   ".to_string())).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("CLAWSHELL_SERVER_HOST cannot be empty")
+        );
+    }
+
+    #[test]
+    fn test_resolve_server_port_override_uses_default_when_unset() {
+        let port = resolve_server_port_override_from_var(3000, Err(VarError::NotPresent)).unwrap();
+        assert_eq!(port, 3000);
+    }
+
+    #[test]
+    fn test_resolve_server_port_override_accepts_env() {
+        let port = resolve_server_port_override_from_var(3000, Ok("17890".to_string())).unwrap();
+        assert_eq!(port, 17890);
+    }
+
+    #[test]
+    fn test_resolve_server_port_override_rejects_invalid_env() {
+        let err =
+            resolve_server_port_override_from_var(3000, Ok("not-a-port".to_string())).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("CLAWSHELL_SERVER_PORT must be a valid port")
         );
     }
 }

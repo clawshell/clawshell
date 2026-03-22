@@ -13,9 +13,11 @@ keys:
   - virtual_key: vk-1
     real_key: sk-real-1
     provider: openai
+    auth: static
   - virtual_key: vk-2
     real_key: sk-real-2
     provider: anthropic
+    auth: static
 dlp:
   patterns:
     - name: ssn

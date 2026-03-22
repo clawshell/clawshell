@@ -1,17 +1,18 @@
-use crate::config::{Config, Provider};
+use crate::config::{Config, KeyAuthMethod, Provider};
 use crate::dlp::DlpScanner;
 use crate::email::{
     EmailAccountCredentials, EmailGetMessageRequest, EmailListMessagesRequest, EmailMessageContent,
     EmailMessageMetadata, EmailPolicy, EmailService, EmailServiceError, ImapEmailService,
     normalize_sender_rule,
 };
-use crate::keys::{KeyManager, ResolvedKey};
+use crate::keys::{KeyManager, KeySource, ResolvedKey};
+use crate::oauth::OAuthRegistry;
 use crate::proxy::ProxyClient;
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
@@ -28,6 +29,7 @@ pub struct AppState {
     pub key_manager: Arc<KeyManager>,
     pub dlp_scanner: Arc<DlpScanner>,
     pub proxy_client: Arc<ProxyClient>,
+    pub oauth_registry: Arc<OAuthRegistry>,
     pub email_enabled: bool,
     pub email_policy: Option<EmailPolicy>,
     pub email_accounts: Arc<BTreeMap<String, EmailAccountCredentials>>,
@@ -35,7 +37,15 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[allow(dead_code)]
     pub fn from_config(config: &Config) -> Result<Self, String> {
+        Self::from_config_with_registry(config, None)
+    }
+
+    pub fn from_config_with_registry(
+        config: &Config,
+        oauth_registry: Option<OAuthRegistry>,
+    ) -> Result<Self, String> {
         let mut upstream_urls = BTreeMap::new();
         upstream_urls.insert(Provider::Openai, config.upstream_url(Provider::Openai));
         upstream_urls.insert(
@@ -47,19 +57,29 @@ impl AppState {
             config.upstream_url(Provider::Anthropic),
         );
 
-        let key_mappings = config
-            .key_map()
-            .iter()
-            .map(|(virtual_key, (real_key, provider))| {
-                (
-                    virtual_key.clone(),
-                    ResolvedKey {
-                        real_key: real_key.clone(),
-                        provider: *provider,
-                    },
-                )
-            })
-            .collect();
+        // Build key mappings for both static and OAuth keys
+        let mut key_mappings: BTreeMap<String, ResolvedKey> = BTreeMap::new();
+
+        for key in &config.keys {
+            let source = match key.auth {
+                KeyAuthMethod::Static => KeySource::Static {
+                    real_key: key.real_key.clone().unwrap_or_default(),
+                },
+                KeyAuthMethod::OAuth => KeySource::OAuth {
+                    provider_id: key.oauth_provider.clone().unwrap_or_default(),
+                },
+            };
+            key_mappings.insert(
+                key.virtual_key.clone(),
+                ResolvedKey {
+                    source,
+                    provider: key.provider,
+                },
+            );
+        }
+
+        let oauth_registry =
+            oauth_registry.unwrap_or_else(|| OAuthRegistry::new(Default::default()));
 
         let email_policy = if config.email.enabled {
             config.email.mode.map(|mode| {
@@ -112,6 +132,7 @@ impl AppState {
                 upstream_urls,
                 config.upstream.anthropic_version.clone(),
             )),
+            oauth_registry: Arc::new(oauth_registry),
             email_enabled: config.email.enabled,
             email_policy,
             email_accounts: Arc::new(email_accounts),
@@ -493,7 +514,7 @@ async fn handle_request(
         );
         error_response(StatusCode::UNAUTHORIZED, "Unknown API key")
     })?;
-    let real_key = resolved.real_key.clone();
+    let source = resolved.source.clone();
     let provider = resolved.provider;
 
     debug!(
@@ -563,15 +584,36 @@ async fn handle_request(
         "Forwarding request to upstream"
     );
 
-    let response = state
-        .proxy_client
-        .forward(
+    let response = match source {
+        KeySource::Static { real_key } => state
+            .proxy_client
+            .forward(
+                method.clone(),
+                &uri,
+                headers,
+                &real_key,
+                body_bytes,
+                provider,
+            )
+            .await
+            .map_err(|e| {
+                error!(
+                    method = %method,
+                    path = %path,
+                    virtual_key = %virtual_key,
+                    error = %e,
+                    "Proxy error"
+                );
+                e.into_response()
+            })?,
+        KeySource::OAuth { provider_id } => forward_oauth_request(
+            &state,
             method.clone(),
             &uri,
             headers,
-            &real_key,
             body_bytes,
             provider,
+            &provider_id,
         )
         .await
         .map_err(|e| {
@@ -579,11 +621,13 @@ async fn handle_request(
                 method = %method,
                 path = %path,
                 virtual_key = %virtual_key,
+                oauth_provider = %provider_id,
                 error = %e,
-                "Proxy error"
+                "OAuth proxy error"
             );
-            e.into_response()
-        })?;
+            error_response(StatusCode::BAD_GATEWAY, &format!("OAuth proxy error: {e}"))
+        })?,
+    };
 
     // 5. DLP scan on response body (redact all PII before returning to client)
     let response = if state.dlp_scanner.scan_responses() {
@@ -627,14 +671,16 @@ async fn handle_request(
                 Response::from_parts(parts, Body::from(body))
             }
         } else {
-            warn!(
+            debug!(
                 method = %method,
                 path = %path,
                 virtual_key = %virtual_key,
-                "Streaming response (SSE) — DLP scanning is not supported for streaming responses; \
-                 PII in streamed content will not be redacted"
+                "Streaming response (SSE) — wrapping with DLP SSE scanner"
             );
-            response
+            let (parts, body) = response.into_parts();
+            let dlp_body =
+                crate::translate::wrap_body_with_dlp_sse_stream(body, state.dlp_scanner.clone());
+            Response::from_parts(parts, dlp_body)
         }
     } else {
         trace!("Response DLP scanning disabled");
@@ -642,6 +688,276 @@ async fn handle_request(
     };
 
     Ok(response)
+}
+
+async fn forward_oauth_request(
+    state: &AppState,
+    method: Method,
+    uri: &Uri,
+    headers: HeaderMap,
+    body_bytes: Bytes,
+    provider: Provider,
+    oauth_provider_id: &str,
+) -> Result<Response, String> {
+    // 1. Inject auth headers
+    let mut auth_headers = HeaderMap::new();
+    state
+        .oauth_registry
+        .inject_auth(oauth_provider_id, &mut auth_headers)
+        .await
+        .map_err(|e| format!("OAuth auth injection failed: {e}"))?;
+
+    // 2. Optionally transform the body
+    let body = match state
+        .oauth_registry
+        .prepare_request_body(oauth_provider_id, &body_bytes)
+        .await
+        .map_err(|e| format!("OAuth body preparation failed: {e}"))?
+    {
+        Some(transformed) => Bytes::from(transformed),
+        None => body_bytes.clone(),
+    };
+
+    // 2b. Check if path needs rewriting (e.g., /v1/chat/completions → /v1/responses)
+    let original_path = uri.path().to_string();
+    let rewritten_path = state
+        .oauth_registry
+        .rewrite_request_path(oauth_provider_id, &original_path)
+        .map_err(|e| format!("OAuth path rewrite failed: {e}"))?;
+    let needs_translation = state
+        .oauth_registry
+        .needs_response_translation(oauth_provider_id, &original_path)
+        .map_err(|e| format!("OAuth translation check failed: {e}"))?;
+    let response_format = state
+        .oauth_registry
+        .response_format(oauth_provider_id, &original_path)
+        .map_err(|e| format!("OAuth response format check failed: {e}"))?;
+    // Check the transformed body for stream flag (fixups may force stream: true)
+    let stream_requested = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("stream")?.as_bool())
+        .unwrap_or(false);
+
+    let effective_uri = if let Some(ref new_path) = rewritten_path {
+        build_rewritten_uri(uri, new_path)?
+    } else {
+        uri.clone()
+    };
+
+    if rewritten_path.is_some() {
+        debug!(
+            oauth_provider = %oauth_provider_id,
+            original_path = %original_path,
+            effective_path = %effective_uri.path(),
+            "Rewrote request path for OAuth provider"
+        );
+    }
+
+    // 3. Optionally get upstream URL override
+    let upstream_url = state
+        .oauth_registry
+        .upstream_url(oauth_provider_id)
+        .await
+        .map_err(|e| format!("OAuth upstream URL resolution failed: {e}"))?;
+
+    // 4. Forward the request
+    let response = state
+        .proxy_client
+        .forward_oauth(
+            method.clone(),
+            &effective_uri,
+            headers.clone(),
+            body.clone(),
+            provider,
+            auth_headers.clone(),
+            upstream_url.as_deref(),
+        )
+        .await
+        .map_err(|e| format!("OAuth forward failed: {e}"))?;
+
+    // 5. If we got a 401, refresh the token and retry once
+    if response.status() == StatusCode::UNAUTHORIZED {
+        info!(
+            oauth_provider = %oauth_provider_id,
+            effective_path = %effective_uri.path(),
+            "Got 401 from upstream, attempting token refresh and retry"
+        );
+        if let Err(e) = state.oauth_registry.refresh(oauth_provider_id).await {
+            warn!(
+                oauth_provider = %oauth_provider_id,
+                error = %e,
+                "Token refresh failed after 401"
+            );
+            return maybe_translate_response(
+                response,
+                needs_translation,
+                stream_requested,
+                response_format,
+            )
+            .await;
+        }
+
+        // Re-inject auth with refreshed token
+        let mut retry_auth_headers = HeaderMap::new();
+        state
+            .oauth_registry
+            .inject_auth(oauth_provider_id, &mut retry_auth_headers)
+            .await
+            .map_err(|e| format!("OAuth retry auth injection failed: {e}"))?;
+
+        // Optionally re-transform the body (tokens may have changed affecting body)
+        let retry_body = match state
+            .oauth_registry
+            .prepare_request_body(oauth_provider_id, &body_bytes)
+            .await
+            .map_err(|e| format!("OAuth retry body preparation failed: {e}"))?
+        {
+            Some(transformed) => Bytes::from(transformed),
+            None => body_bytes,
+        };
+
+        let retry_response = state
+            .proxy_client
+            .forward_oauth(
+                method,
+                &effective_uri,
+                headers,
+                retry_body,
+                provider,
+                retry_auth_headers,
+                upstream_url.as_deref(),
+            )
+            .await
+            .map_err(|e| format!("OAuth retry forward failed: {e}"))?;
+
+        if retry_response.status() == StatusCode::UNAUTHORIZED {
+            warn!(
+                oauth_provider = %oauth_provider_id,
+                effective_path = %effective_uri.path(),
+                "Retry after token refresh still returned 401"
+            );
+        }
+
+        return maybe_translate_response(
+            retry_response,
+            needs_translation,
+            stream_requested,
+            response_format,
+        )
+        .await;
+    }
+
+    // Log error response bodies for debugging upstream issues
+    if response.status().is_client_error() || response.status().is_server_error() {
+        let status = response.status();
+        let (parts, body) = response.into_parts();
+        let body_bytes_resp = body
+            .collect()
+            .await
+            .map(|b| b.to_bytes())
+            .unwrap_or_default();
+        if let Ok(body_str) = std::str::from_utf8(&body_bytes_resp) {
+            warn!(
+                oauth_provider = %oauth_provider_id,
+                effective_path = %effective_uri.path(),
+                status = %status,
+                response_body = %body_str,
+                "Upstream returned error"
+            );
+        }
+        let response = Response::from_parts(parts, Body::from(body_bytes_resp));
+        return maybe_translate_response(
+            response,
+            needs_translation,
+            stream_requested,
+            response_format,
+        )
+        .await;
+    }
+
+    maybe_translate_response(
+        response,
+        needs_translation,
+        stream_requested,
+        response_format,
+    )
+    .await
+}
+
+/// Optionally translate an upstream response back to chat/completions format.
+async fn maybe_translate_response(
+    response: Response,
+    needs_translation: bool,
+    stream_requested: bool,
+    response_format: Option<crate::oauth::ResponseFormat>,
+) -> Result<Response, String> {
+    // Use response_format if available; fall back to needs_translation for backwards compat
+    let format = match response_format {
+        Some(f) => f,
+        None if needs_translation => crate::oauth::ResponseFormat::ResponsesApi,
+        None => return Ok(response),
+    };
+
+    let is_streaming = stream_requested
+        || response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/event-stream"));
+
+    debug!(format = ?format, is_streaming, "maybe_translate_response: translating response");
+
+    if is_streaming {
+        let (parts, body) = response.into_parts();
+        let translated_body = match format {
+            crate::oauth::ResponseFormat::ResponsesApi => {
+                debug!("Wrapping streaming response with ResponsesApi translator");
+                crate::translate::wrap_body_with_translate_stream(body)
+            }
+        };
+        return Ok(Response::from_parts(parts, translated_body));
+    }
+
+    // Non-streaming: only translate successful responses
+    let status = response.status();
+    if !status.is_success() {
+        return Ok(response);
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let body_bytes = body
+        .collect()
+        .await
+        .map_err(|e| format!("failed to read response body for translation: {e}"))?
+        .to_bytes();
+
+    match format {
+        crate::oauth::ResponseFormat::ResponsesApi => {
+            match crate::translate::responses_to_chat_completion(&body_bytes) {
+                Ok(translated) => {
+                    parts.headers.remove("content-length");
+                    Ok(Response::from_parts(parts, Body::from(translated)))
+                }
+                Err(e) => {
+                    warn!(error = %e, "Response translation failed, returning original");
+                    Ok(Response::from_parts(parts, Body::from(body_bytes)))
+                }
+            }
+        }
+    }
+}
+
+/// Build a new URI with a rewritten path, preserving query string.
+/// Incoming axum URIs are path-only (no scheme/authority), so we build path-only too.
+fn build_rewritten_uri(original: &Uri, new_path: &str) -> Result<Uri, String> {
+    let path_and_query = if let Some(query) = original.query() {
+        format!("{new_path}?{query}")
+    } else {
+        new_path.to_string()
+    };
+    path_and_query
+        .parse::<Uri>()
+        .map_err(|e| format!("failed to build rewritten URI: {e}"))
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {

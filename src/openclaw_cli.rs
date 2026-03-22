@@ -692,6 +692,7 @@ mod tests {
         onboard::OnboardConfig {
             provider: "openai".to_string(),
             model: "gpt-5".to_string(),
+            auth_method: onboard::OnboardAuthMethod::StaticKey,
             real_api_key: "real_key".to_string(),
             virtual_api_key: "virtual_key".to_string(),
             openclaw_config_path: PathBuf::from("/home/user/.openclaw/openclaw.json"),

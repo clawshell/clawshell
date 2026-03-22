@@ -1,6 +1,6 @@
 use super::config_render::default_openclaw_config_path;
 use super::credentials::detect_openclaw_api_key_for_provider;
-use super::types::{OnboardConfig, OnboardEmailConfig, OnboardEmailMode};
+use super::types::{OnboardAuthMethod, OnboardConfig, OnboardEmailConfig, OnboardEmailMode};
 use crate::email::{EmailAccountCredentials, ImapEmailService};
 use crate::tui;
 
@@ -67,6 +67,14 @@ fn load_existing_config_from_vfs(config_dir: &VfsPath) -> Option<ExistingConfig>
             .map(String::from);
         existing.openclaw_config_path = json
             .get("openclaw_config_path")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        existing.auth_method = json
+            .get("auth_method")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        existing.oauth_provider = json
+            .get("oauth_provider")
             .and_then(|v| v.as_str())
             .map(String::from);
     }
@@ -259,6 +267,8 @@ struct ExistingConfig {
     openclaw_config_path: Option<String>,
     server_host: Option<String>,
     server_port: Option<String>,
+    auth_method: Option<String>,
+    oauth_provider: Option<String>,
     email_enabled: Option<bool>,
     email_mode: Option<OnboardEmailMode>,
     email_sender_rules: Vec<String>,
@@ -278,6 +288,8 @@ impl ExistingConfig {
             || self.openclaw_config_path.is_some()
             || self.server_host.is_some()
             || self.server_port.is_some()
+            || self.auth_method.is_some()
+            || self.oauth_provider.is_some()
             || self.email_enabled.is_some()
             || self.email_mode.is_some()
             || !self.email_sender_rules.is_empty()
@@ -308,51 +320,56 @@ fn mask_secret(secret: &str) -> String {
     }
 }
 
-/// Collect all onboarding information using the TUI (interactive terminal prompts).
-/// If a previous configuration exists, its values are used as defaults.
-pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error::Error>> {
-    let existing = load_existing_config();
+/// Run the OAuth login flow for the given provider, persisting tokens.
+fn run_oauth_login(provider_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::oauth::codex::CodexProvider;
+    use crate::oauth::{OAuthProvider, TokenStorage};
 
-    if existing.is_some() {
-        tui::print_success("Existing configuration detected — using as defaults.");
-        println!();
+    let provider: Box<dyn OAuthProvider + Send + Sync> = match provider_id {
+        "codex" => Box::new(CodexProvider::new(None, None, None, None)),
+        other => return Err(format!("unknown OAuth provider: {other}").into()),
+    };
+
+    let storage = TokenStorage::default();
+
+    // Called from within #[tokio::main], so use block_in_place to avoid
+    // "Cannot start a runtime from within a runtime" panic.
+    let run_async = |fut: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>| {
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::block_in_place(|| handle.block_on(fut))
+    };
+
+    let tokens = if provider.supports_device_code() {
+        tui::print_info("Flow", "device code (no browser required)");
+        run_async(Box::pin(provider.login_headless()))?
+    } else if provider.supports_headless_url() {
+        tui::print_info("Flow", "headless (copy URL, paste code)");
+        run_async(Box::pin(provider.login_headless()))?
+    } else {
+        tui::print_info("Flow", "browser login");
+        tui::print_warning("A browser window will open for you to authorize access.");
+        run_async(Box::pin(provider.login_browser(8400)))?
+    };
+
+    storage.save(provider_id, &tokens)?;
+    tui::print_success("OAuth login successful — tokens saved.");
+    if let Some(acct) = tokens.account_id.as_deref() {
+        tui::print_info("Account", acct);
     }
 
-    let existing = existing.unwrap_or_default();
+    Ok(())
+}
 
-    tui::print_section("API Configuration");
-
-    // Provider selection — if existing, reorder so the existing choice is first
-    let provider_options = match existing.provider.as_deref() {
-        Some("anthropic") => vec!["Anthropic", "OpenAI", "OpenRouter"],
-        Some("openrouter") => vec!["OpenRouter", "OpenAI", "Anthropic"],
-        _ => vec!["OpenAI", "OpenRouter", "Anthropic"],
-    };
-    let provider_choice = tui::prompt_select("Select a model provider", provider_options)?;
-    let provider = match provider_choice {
-        "Anthropic" => "anthropic".to_string(),
-        "OpenRouter" => "openrouter".to_string(),
-        _ => "openai".to_string(),
-    };
-
-    // Model name — use existing model or provider-specific default
-    let default_model = existing
-        .model
-        .as_deref()
-        .unwrap_or(match provider.as_str() {
-            "anthropic" => "claude-sonnet-4-5-20250929",
-            "openai" => "gpt-5.2-chat-latest",
-            "openrouter" => "openrouter/auto",
-            _ => unreachable!(),
-        });
-    let model = tui::prompt_text("Enter the model name", Some(default_model))?;
-
-    // Real API key — if ClawShell already has one, use it; otherwise try detecting from OpenClaw
+/// Collect a static API key from the user (original flow).
+fn collect_static_api_key(
+    provider: &str,
+    existing: &ExistingConfig,
+) -> Result<String, Box<dyn std::error::Error>> {
     let is_first_onboard = existing.real_api_key.is_none();
     let effective_existing_key = if !is_first_onboard {
         existing.real_api_key.clone()
     } else {
-        let key = detect_openclaw_api_key_for_provider(&provider);
+        let key = detect_openclaw_api_key_for_provider(provider);
         if key.is_some() {
             tui::print_warning(
                 "An API key was detected from your OpenClaw config. \
@@ -364,15 +381,12 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
     };
 
     let real_api_key = if let Some(ref existing_key) = effective_existing_key {
-        // Show a truncated version so the user knows what key is on file
         let masked = mask_secret(existing_key);
         tui::print_info("Existing key", &masked);
 
         let prompt_msg = if is_first_onboard {
-            // Key was detected from OpenClaw — strongly recommend rotating
             "Enter a NEW API key (recommended) or leave blank to reuse the detected key"
         } else {
-            // Re-onboard — key already managed by ClawShell
             tui::print_warning(
                 "Consider rotating your API key periodically. \
                  Generate a fresh key from your provider and enter it below.",
@@ -391,6 +405,90 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
             return Err("API key cannot be empty".into());
         }
         input
+    };
+
+    Ok(real_api_key)
+}
+
+/// Collect all onboarding information using the TUI (interactive terminal prompts).
+/// If a previous configuration exists, its values are used as defaults.
+pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error::Error>> {
+    let existing = load_existing_config();
+
+    if existing.is_some() {
+        tui::print_success("Existing configuration detected — using as defaults.");
+        println!();
+    }
+
+    let existing = existing.unwrap_or_default();
+
+    tui::print_section("API Configuration");
+
+    // Provider selection
+    const MENU_OPENAI: &str = "OpenAI";
+    const MENU_OPENROUTER: &str = "OpenRouter";
+    const MENU_ANTHROPIC: &str = "Anthropic";
+    const MENU_CODEX: &str = "Codex / ChatGPT (OAuth)";
+    let all_options = [MENU_OPENAI, MENU_OPENROUTER, MENU_ANTHROPIC, MENU_CODEX];
+
+    // Reorder so the existing choice appears first
+    let preferred = match (
+        existing.auth_method.as_deref(),
+        existing.oauth_provider.as_deref(),
+        existing.provider.as_deref(),
+    ) {
+        (Some("oauth"), Some("codex"), _) | (Some("oauth"), _, _) => Some(MENU_CODEX),
+        (_, _, Some("anthropic")) => Some(MENU_ANTHROPIC),
+        (_, _, Some("openrouter")) => Some(MENU_OPENROUTER),
+        (_, _, Some("openai")) => Some(MENU_OPENAI),
+        _ => None,
+    };
+    let provider_options: Vec<&str> = if let Some(first) = preferred {
+        std::iter::once(first)
+            .chain(all_options.iter().copied().filter(|o| *o != first))
+            .collect()
+    } else {
+        all_options.to_vec()
+    };
+
+    let provider_choice = tui::prompt_select("Select a model provider", provider_options)?;
+
+    let (provider, auth_method) = match provider_choice {
+        MENU_ANTHROPIC => ("anthropic".to_string(), OnboardAuthMethod::StaticKey),
+        MENU_OPENROUTER => ("openrouter".to_string(), OnboardAuthMethod::StaticKey),
+        MENU_CODEX => (
+            "openai".to_string(),
+            OnboardAuthMethod::OAuth {
+                provider_id: "codex".to_string(),
+            },
+        ),
+        _ => ("openai".to_string(), OnboardAuthMethod::StaticKey),
+    };
+
+    // Model name — use existing model or provider/auth-specific default
+    let default_model = existing.model.as_deref().unwrap_or(match provider_choice {
+        MENU_ANTHROPIC => "claude-sonnet-4-5-20250929",
+        MENU_OPENROUTER => "openrouter/auto",
+        MENU_CODEX => "gpt-5.2-chat-latest",
+        _ => "gpt-5.2-chat-latest", // OpenAI default
+    });
+    let model = tui::prompt_text("Enter the model name", Some(default_model))?;
+
+    let real_api_key = match &auth_method {
+        OnboardAuthMethod::OAuth { provider_id } => {
+            // OAuth flow — run device code or browser login
+            tui::print_section("OAuth Login");
+            tui::print_info("OAuth provider", provider_id);
+
+            run_oauth_login(provider_id)?;
+
+            // No static API key needed for OAuth
+            String::new()
+        }
+        OnboardAuthMethod::StaticKey => {
+            // Static key flow — same as before
+            collect_static_api_key(&provider, &existing)?
+        }
     };
 
     // Virtual API key
@@ -705,6 +803,7 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
     Ok(OnboardConfig {
         provider,
         model,
+        auth_method,
         real_api_key,
         virtual_api_key,
         openclaw_config_path: PathBuf::from(openclaw_config_path),
