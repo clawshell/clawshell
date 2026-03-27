@@ -884,6 +884,14 @@ fn cmd_config(config_path: &str, edit: bool) -> Result<(), Box<dyn std::error::E
                     .as_deref()
                     .unwrap_or("https://api.anthropic.com (default)"),
             );
+            tui::print_info(
+                "Upstream (MiniMax)",
+                config
+                    .upstream
+                    .minimax_base_url
+                    .as_deref()
+                    .unwrap_or("https://api.minimax.io (default)"),
+            );
 
             tui::print_section("Keys");
             println!("  {} configured", config.keys.len());

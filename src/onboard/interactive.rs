@@ -428,8 +428,15 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
     const MENU_OPENAI: &str = "OpenAI";
     const MENU_OPENROUTER: &str = "OpenRouter";
     const MENU_ANTHROPIC: &str = "Anthropic";
+    const MENU_MINIMAX: &str = "MiniMax";
     const MENU_CODEX: &str = "Codex / ChatGPT (OAuth)";
-    let all_options = [MENU_OPENAI, MENU_OPENROUTER, MENU_ANTHROPIC, MENU_CODEX];
+    let all_options = [
+        MENU_OPENAI,
+        MENU_OPENROUTER,
+        MENU_ANTHROPIC,
+        MENU_MINIMAX,
+        MENU_CODEX,
+    ];
 
     // Reorder so the existing choice appears first
     let preferred = match (
@@ -440,6 +447,7 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
         (Some("oauth"), Some("codex"), _) | (Some("oauth"), _, _) => Some(MENU_CODEX),
         (_, _, Some("anthropic")) => Some(MENU_ANTHROPIC),
         (_, _, Some("openrouter")) => Some(MENU_OPENROUTER),
+        (_, _, Some("minimax")) => Some(MENU_MINIMAX),
         (_, _, Some("openai")) => Some(MENU_OPENAI),
         _ => None,
     };
@@ -456,6 +464,7 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
     let (provider, auth_method) = match provider_choice {
         MENU_ANTHROPIC => ("anthropic".to_string(), OnboardAuthMethod::StaticKey),
         MENU_OPENROUTER => ("openrouter".to_string(), OnboardAuthMethod::StaticKey),
+        MENU_MINIMAX => ("minimax".to_string(), OnboardAuthMethod::StaticKey),
         MENU_CODEX => (
             "openai".to_string(),
             OnboardAuthMethod::OAuth {
@@ -470,6 +479,7 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
         MENU_ANTHROPIC => "claude-sonnet-4-5-20250929",
         MENU_OPENROUTER => "openrouter/auto",
         MENU_CODEX => "gpt-5.2-chat-latest",
+        MENU_MINIMAX => "MiniMax-M2.7",
         _ => "gpt-5.2-chat-latest", // OpenAI default
     });
     let model = tui::prompt_text("Enter the model name", Some(default_model))?;

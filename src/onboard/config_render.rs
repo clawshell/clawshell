@@ -65,6 +65,7 @@ port = {port}
 openai_base_url = "https://api.openai.com"
 openrouter_base_url = "https://openrouter.ai/api"
 anthropic_base_url = "https://api.anthropic.com"
+minimax_base_url = "https://api.minimax.io"
 
 {key_section}[dlp]
 scan_responses = true

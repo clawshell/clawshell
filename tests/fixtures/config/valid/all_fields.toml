@@ -8,6 +8,7 @@ port = 8080
 openai_base_url = "https://custom.api.com"
 anthropic_base_url = "https://custom.anthropic.com"
 anthropic_version = "2024-01-01"
+minimax_base_url = "https://api.minimax.io"
 
 [[keys]]
 virtual_key = "vk-1"
@@ -17,6 +18,11 @@ real_key = "sk-real-1"
 virtual_key = "vk-2"
 real_key = "sk-real-2"
 provider = "anthropic"
+
+[[keys]]
+virtual_key = "vk-3"
+real_key = "sk-real-3"
+provider = "minimax"
 
 [dlp]
 scan_responses = true

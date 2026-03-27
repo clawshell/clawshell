@@ -1,5 +1,6 @@
 ---
-source: tests/config_fixtures.rs
+source: src/config.rs
+assertion_line: 636
 expression: snapshot
 ---
 server:
@@ -9,6 +10,7 @@ upstream:
   openai_base_url: "https://custom.api.com"
   anthropic_base_url: "https://custom.anthropic.com"
   anthropic_version: 2024-01-01
+  minimax_base_url: "https://api.minimax.io"
 keys:
   - virtual_key: vk-1
     real_key: sk-real-1
@@ -17,6 +19,10 @@ keys:
   - virtual_key: vk-2
     real_key: sk-real-2
     provider: anthropic
+    auth: static
+  - virtual_key: vk-3
+    real_key: sk-real-3
+    provider: minimax
     auth: static
 dlp:
   patterns:
@@ -39,3 +45,6 @@ derived:
     vk-2:
       - sk-real-2
       - anthropic
+    vk-3:
+      - sk-real-3
+      - minimax
