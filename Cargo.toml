@@ -28,7 +28,7 @@ clap = { version = "4.6.0", features = ["derive"] }
 nix = { version = "0.31.2", features = ["signal", "process", "feature", "user"] }
 inquire = "0.9.4"
 console = "0.16.3"
-vfs = "0.12"
+vfs = "0.13"
 thiserror = "2"
 semver = "1"
 rustls-native-certs = "0.8.3"
