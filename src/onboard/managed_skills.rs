@@ -61,7 +61,7 @@ fn now_unix_seconds() -> u64 {
 
 fn hash_content(content: &[u8]) -> String {
     let digest = Sha256::digest(content);
-    format!("{digest:x}")
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn as_unmanaged(detail: impl Into<String>) -> ManagedSkillInspection {
