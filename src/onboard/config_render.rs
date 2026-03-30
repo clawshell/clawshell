@@ -70,11 +70,11 @@ minimax_base_url = "https://api.minimax.io"
 {key_section}[dlp]
 scan_responses = true
 patterns = [
-    {{ name = "ssn",             regex = '\\b\\d{{3}}-\\d{{2}}-\\d{{4}}\\b',                                             action = "redact" }},
-    {{ name = "visa_card",       regex = '\\b4[0-9]{{12}}(?:[0-9]{{3}})?\\b',                                        action = "redact" }},
-    {{ name = "visa_mastercard", regex = '\\b(?:4[0-9]{{12}}(?:[0-9]{{3}})?|5[1-5][0-9]{{14}})\\b',                  action = "redact" }},
-    {{ name = "mastercard",      regex = '\\b5[1-5][0-9]{{14}}\\b',                                                  action = "redact" }},
-    {{ name = "amex_card",       regex = '\\b3[47][0-9]{{13}}\\b',                                                   action = "redact" }},
+    {{ name = "ssn",             regex = '\b\d{{3}}-\d{{2}}-\d{{4}}\b',                                            action = "redact" }},
+    {{ name = "visa_card",       regex = '\b4[0-9]{{12}}(?:[0-9]{{3}})?\b',                                        action = "redact" }},
+    {{ name = "visa_mastercard", regex = '\b(?:4[0-9]{{12}}(?:[0-9]{{3}})?|5[1-5][0-9]{{14}})\b',                  action = "redact" }},
+    {{ name = "mastercard",      regex = '\b5[1-5][0-9]{{14}}\b',                                                  action = "redact" }},
+    {{ name = "amex_card",       regex = '\b3[47][0-9]{{13}}\b',                                                   action = "redact" }},
 ]
 {oauth_providers_section}"#,
         version = env!("CARGO_PKG_VERSION"),
