@@ -1,5 +1,5 @@
 use super::types::{
-    OPENCLAW_EMAIL_MESSAGES_SKILL_NAME, OnboardConfig, OnboardSkillBundle, OnboardSkillFile,
+    EMAIL_MESSAGES_SKILL_NAME, OnboardConfig, OnboardSkillBundle, OnboardSkillFile,
 };
 
 fn format_clawshell_base_url(host: &str, port: u16) -> String {
@@ -11,11 +11,11 @@ fn format_clawshell_base_url(host: &str, port: u16) -> String {
     }
 }
 
-pub fn should_setup_openclaw_email_skill(config: &OnboardConfig) -> bool {
+pub fn should_setup_email_skill(config: &OnboardConfig) -> bool {
     config.email.is_some()
 }
 
-pub fn render_openclaw_email_messages_skill(config: &OnboardConfig) -> Option<OnboardSkillBundle> {
+pub fn render_email_messages_skill(config: &OnboardConfig) -> Option<OnboardSkillBundle> {
     config.email.as_ref()?;
     let base_url = format_clawshell_base_url(&config.server_host, config.server_port);
 
@@ -144,7 +144,7 @@ Expected top-level fields:
     );
 
     Some(OnboardSkillBundle {
-        name: OPENCLAW_EMAIL_MESSAGES_SKILL_NAME,
+        name: EMAIL_MESSAGES_SKILL_NAME,
         files: vec![
             OnboardSkillFile {
                 relative_path: "SKILL.md",
@@ -165,13 +165,13 @@ mod tests {
     use crate::onboard::types::{OnboardEmailConfig, OnboardEmailMode};
 
     #[test]
-    fn test_should_setup_openclaw_email_skill_returns_false_without_email() {
+    fn test_should_setup_email_skill_returns_false_without_email() {
         let config = test_config();
-        assert!(!should_setup_openclaw_email_skill(&config));
+        assert!(!should_setup_email_skill(&config));
     }
 
     #[test]
-    fn test_should_setup_openclaw_email_skill_returns_true_with_email() {
+    fn test_should_setup_email_skill_returns_true_with_email() {
         let mut config = test_config();
         config.email = Some(OnboardEmailConfig {
             mode: OnboardEmailMode::Allowlist,
@@ -183,17 +183,17 @@ mod tests {
             imap_port: 993,
         });
 
-        assert!(should_setup_openclaw_email_skill(&config));
+        assert!(should_setup_email_skill(&config));
     }
 
     #[test]
-    fn test_render_openclaw_email_messages_skill_returns_none_without_email() {
+    fn test_render_email_messages_skill_returns_none_without_email() {
         let config = test_config();
-        assert!(render_openclaw_email_messages_skill(&config).is_none());
+        assert!(render_email_messages_skill(&config).is_none());
     }
 
     #[test]
-    fn test_render_openclaw_email_messages_skill_renders_concrete_values() {
+    fn test_render_email_messages_skill_renders_concrete_values() {
         let mut config = test_config();
         config.email = Some(OnboardEmailConfig {
             mode: OnboardEmailMode::Allowlist,
@@ -205,8 +205,8 @@ mod tests {
             imap_port: 993,
         });
 
-        let skill = render_openclaw_email_messages_skill(&config).unwrap();
-        assert_eq!(skill.name, OPENCLAW_EMAIL_MESSAGES_SKILL_NAME);
+        let skill = render_email_messages_skill(&config).unwrap();
+        assert_eq!(skill.name, EMAIL_MESSAGES_SKILL_NAME);
         assert_eq!(skill.files.len(), 2);
 
         let skill_md = skill

@@ -695,7 +695,9 @@ mod tests {
             auth_method: onboard::OnboardAuthMethod::StaticKey,
             real_api_key: "real_key".to_string(),
             virtual_api_key: "virtual_key".to_string(),
-            openclaw_config_path: PathBuf::from("/home/user/.openclaw/openclaw.json"),
+            target: onboard::OnboardTarget::Openclaw {
+                config_path: PathBuf::from("/home/user/.openclaw/openclaw.json"),
+            },
             server_host: "127.0.0.1".to_string(),
             server_port: 18790,
             email: None,

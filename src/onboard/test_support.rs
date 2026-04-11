@@ -1,4 +1,4 @@
-use super::OnboardConfig;
+use super::{OnboardConfig, OnboardTarget};
 use std::path::PathBuf;
 use vfs::VfsPath;
 
@@ -9,7 +9,9 @@ pub(super) fn test_config() -> OnboardConfig {
         auth_method: super::types::OnboardAuthMethod::StaticKey,
         real_api_key: "sk-real-key-123".to_string(),
         virtual_api_key: "{clawshell-virtual-key-openai}".to_string(),
-        openclaw_config_path: PathBuf::from("/tmp/test-openclaw.json"),
+        target: OnboardTarget::Openclaw {
+            config_path: PathBuf::from("/tmp/test-openclaw.json"),
+        },
         server_host: "127.0.0.1".to_string(),
         server_port: 18790,
         email: None,

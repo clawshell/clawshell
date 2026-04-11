@@ -7,6 +7,7 @@ mod cli;
 mod config;
 mod dlp;
 mod email;
+mod hermes_cli;
 mod keys;
 mod migration;
 #[allow(dead_code)]
@@ -129,12 +130,13 @@ struct WrittenOpenclawSkill {
 
 fn write_onboard_openclaw_skill(
     ob_config: &crate::onboard::OnboardConfig,
+    openclaw_config_path: &Path,
 ) -> Result<Option<WrittenOpenclawSkill>, Box<dyn Error>> {
-    let Some(skill) = onboard::render_openclaw_email_messages_skill(ob_config) else {
+    let Some(skill) = onboard::render_email_messages_skill(ob_config) else {
         return Ok(None);
     };
 
-    let openclaw_root = onboard::openclaw_config_root(&ob_config.openclaw_config_path);
+    let openclaw_root = onboard::openclaw_config_root(openclaw_config_path);
     let skill_dir = openclaw_root.join("skills").join(skill.name);
     std::fs::create_dir_all(&skill_dir)?;
 
@@ -152,10 +154,10 @@ fn write_onboard_openclaw_skill(
     onboard::write_managed_skill_metadata(&skill_dir, &metadata)?;
     let manifest_entry = onboard::build_managed_skill_manifest_entry(&skill_dir, &metadata);
 
-    if !align_owner_with_openclaw_path(&skill_dir, &ob_config.openclaw_config_path)? {
+    if !align_owner_with_openclaw_path(&skill_dir, openclaw_config_path)? {
         warn!(
             path = %skill_dir.display(),
-            openclaw_path = %ob_config.openclaw_config_path.display(),
+            openclaw_path = %openclaw_config_path.display(),
             "Could not determine OpenClaw file owner while writing skill files; will retry later"
         );
     }
@@ -164,6 +166,80 @@ fn write_onboard_openclaw_skill(
         path: skill_dir,
         manifest_entry,
     }))
+}
+
+/// Resolve the home directory and uid:gid of the user running onboarding.
+/// When clawshell is invoked under sudo, prefer SUDO_USER over root so we
+/// look at (and write to) the real user's `~/.hermes/`, not root's.
+#[cfg(unix)]
+fn resolve_hermes_target_user() -> Result<(PathBuf, u32, u32), Box<dyn Error>> {
+    if let Ok(user_name) = std::env::var("SUDO_USER")
+        && !user_name.trim().is_empty()
+        && user_name.trim() != "root"
+        && let Ok(Some(user)) = nix::unistd::User::from_name(user_name.trim())
+    {
+        return Ok((user.dir, user.uid.as_raw(), user.gid.as_raw()));
+    }
+
+    let uid = nix::unistd::getuid().as_raw();
+    let gid = nix::unistd::getgid().as_raw();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| -> Box<dyn Error> {
+            "failed to resolve target user home directory for Hermes skill install (HOME unset)"
+                .into()
+        })?;
+    Ok((home, uid, gid))
+}
+
+#[cfg(not(unix))]
+fn resolve_hermes_target_user() -> Result<(PathBuf, u32, u32), Box<dyn Error>> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| -> Box<dyn Error> { "HOME environment variable not set".into() })?;
+    Ok((home, 0, 0))
+}
+
+/// Write the ClawShell-managed email skill into the invoking user's
+/// `~/.hermes/skills/<skill_name>/` directory. Returns the install path
+/// when the skill was written, or `None` when the skill render function
+/// declined (e.g. email integration not configured).
+///
+/// Unlike `write_onboard_openclaw_skill`, this doesn't upsert a
+/// `managed_skills` manifest entry — Hermes discovers skills from its own
+/// `~/.hermes/skills/` tree directly and doesn't share OpenClaw's
+/// manifest bookkeeping.
+fn write_onboard_hermes_skill(
+    ob_config: &crate::onboard::OnboardConfig,
+) -> Result<Option<PathBuf>, Box<dyn Error>> {
+    let Some(skill) = onboard::render_email_messages_skill(ob_config) else {
+        return Ok(None);
+    };
+
+    let (home_dir, uid, gid) = resolve_hermes_target_user()?;
+    let skill_dir = home_dir.join(".hermes").join("skills").join(skill.name);
+    std::fs::create_dir_all(&skill_dir)?;
+
+    for file in skill.files {
+        let path = skill_dir.join(file.relative_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, &file.content)?;
+    }
+
+    // Chown the skill dir (and contents) to the invoking user so Hermes —
+    // which runs as that user, not root — can read them.
+    let owner_spec = format!("{uid}:{gid}");
+    if let Err(error) = chown_path(&skill_dir, &owner_spec, true) {
+        warn!(
+            error = %error,
+            path = %skill_dir.display(),
+            "Failed to chown Hermes skill dir to invoking user"
+        );
+    }
+
+    Ok(Some(skill_dir))
 }
 
 fn resolve_openclaw_owner_spec(openclaw_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
@@ -1001,10 +1077,251 @@ fn cmd_migrate_config(
     Ok(())
 }
 
+const ONBOARD_TOTAL_STEPS: usize = 9;
+
+/// Steps 6, 7, 8 of the onboarding wizard when the user picked OpenClaw as
+/// the downstream agent target. Encapsulates the OpenClaw skill write,
+/// backup, credential cleanup preview, and `openclaw config set` apply.
+fn apply_openclaw_onboarding_steps(
+    ob_config: &crate::onboard::OnboardConfig,
+    openclaw_path: &Path,
+    config_file: &Path,
+) -> Result<(), Box<dyn Error>> {
+    const TOTAL_STEPS: usize = ONBOARD_TOTAL_STEPS;
+
+    // Step 6: Write OpenClaw skill files
+    tui::print_step(6, TOTAL_STEPS, "OpenClaw skill setup...");
+    println!();
+    let openclaw_skill = if onboard::should_setup_email_skill(ob_config) {
+        let openclaw_skill_edit_approved =
+            tui::prompt_confirm("Write OpenClaw skill files for email integration", true)?;
+        let openclaw_skill = if openclaw_skill_edit_approved {
+            write_onboard_openclaw_skill(ob_config, openclaw_path)?
+        } else {
+            None
+        };
+        if openclaw_skill_edit_approved {
+            if let Some(skill) = openclaw_skill.as_ref() {
+                onboard::upsert_managed_skill_manifest_entry(config_file, &skill.manifest_entry)?;
+                tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills written");
+                tui::print_info("OpenClaw skill", &skill.path.display().to_string());
+            } else {
+                tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills skipped");
+            }
+        } else {
+            tui::print_step_done(
+                6,
+                TOTAL_STEPS,
+                "OpenClaw skills skipped (approval not granted)",
+            );
+        }
+        openclaw_skill
+    } else {
+        tui::print_step_done(
+            6,
+            TOTAL_STEPS,
+            "OpenClaw skills skipped (email integration not configured)",
+        );
+        None
+    };
+
+    // Step 7: Backup OpenClaw configuration file if present.
+    tui::print_step(7, TOTAL_STEPS, "Backing up OpenClaw configuration...");
+    if openclaw_path.exists() {
+        let backup = onboard::backup_openclaw_config(openclaw_path)?;
+        tui::print_step_done(7, TOTAL_STEPS, "OpenClaw config backed up");
+        tui::print_info("Backup", &backup.display().to_string());
+        print_openclaw_recovery_notice(openclaw_path, &backup);
+    } else {
+        tui::print_step_done(7, TOTAL_STEPS, "OpenClaw config backup skipped");
+        tui::print_warning(&format!(
+            "OpenClaw config not found at: {}",
+            openclaw_path.display()
+        ));
+    }
+
+    // Step 8: Remove legacy provider credentials and update OpenClaw config.
+    tui::print_step(8, TOTAL_STEPS, "OpenClaw update setup...");
+    let openclaw_state_dir = onboard::openclaw_config_root(openclaw_path);
+    println!();
+    let cleanup_preview = onboard::preview_openclaw_provider_credential_cleanup(
+        &openclaw_state_dir,
+        &ob_config.real_api_key,
+    )?;
+    let config_mutation_preview = match build_openclaw_config_mutation_preview(
+        openclaw_path,
+        ob_config,
+    ) {
+        Ok(preview) => preview,
+        Err(error) => {
+            warn!(
+                error = %error,
+                path = %openclaw_path.display(),
+                "Failed to build exact OpenClaw config mutation preview; showing fallback payload"
+            );
+            fallback_openclaw_config_mutation_preview(ob_config)
+        }
+    };
+    tui::print_info(
+        "OpenClaw state dir",
+        &openclaw_state_dir.display().to_string(),
+    );
+    tui::print_info("OpenClaw config path", &openclaw_path.display().to_string());
+    tui::print_info(
+        "Mapped-key policy",
+        "Only entries matching the mapped virtual-key target will be removed",
+    );
+    if cleanup_preview.state_dir_exists {
+        if let Some(dot_env) = cleanup_preview.dot_env.as_ref() {
+            print_openclaw_cleanup_file_preview(dot_env);
+        }
+        for auth_profile in &cleanup_preview.auth_profiles {
+            print_openclaw_cleanup_file_preview(auth_profile);
+        }
+        if let Some(oauth) = cleanup_preview.oauth.as_ref() {
+            print_openclaw_cleanup_file_preview(oauth);
+        }
+        if !cleanup_preview.has_changes() {
+            tui::print_info("State-dir edits", "none (no mapped-key match)");
+        }
+    } else {
+        tui::print_warning(&format!(
+            "OpenClaw state dir not found: {}",
+            openclaw_state_dir.display()
+        ));
+    }
+    print_openclaw_config_mutation_preview(&config_mutation_preview)?;
+    let openclaw_edit_approved = tui::prompt_confirm(
+        "Proceed with the exact OpenClaw edits shown above (backups first)",
+        true,
+    )?;
+    if !openclaw_edit_approved {
+        tui::print_step_done(
+            8,
+            TOTAL_STEPS,
+            "OpenClaw update skipped (approval not granted)",
+        );
+        return Err("Onboarding aborted: OpenClaw edit approval was not granted.".into());
+    }
+
+    tui::print_step(8, TOTAL_STEPS, "Applying OpenClaw updates...");
+    println!();
+    let cleanup = onboard::cleanup_openclaw_provider_credentials(
+        &openclaw_state_dir,
+        &ob_config.real_api_key,
+    )?;
+    if cleanup.has_changes() {
+        tui::print_info("Legacy credential cleanup", "applied");
+        tui::print_info(
+            "Env entries removed",
+            &cleanup.dot_env_entries_removed.to_string(),
+        );
+        tui::print_info(
+            "Auth profiles updated",
+            &cleanup.auth_profile_files_updated.to_string(),
+        );
+        tui::print_info(
+            "Auth profile entries removed",
+            &cleanup.auth_profile_entries_removed.to_string(),
+        );
+        tui::print_info(
+            "OAuth entries removed",
+            &cleanup.oauth_entries_removed.to_string(),
+        );
+        tui::print_info(
+            "Backup files created",
+            &cleanup.backup_files_created.to_string(),
+        );
+    }
+    let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
+    tui::print_info(
+        "OpenClaw workaround",
+        "Temporarily setting `gateway.reload.mode` to `off` during config updates, then restoring `hybrid`.",
+    );
+    openclaw_cli::apply_onboard_openclaw_config(&mut openclaw_runner, ob_config)?;
+    if let Some(skill) = openclaw_skill.as_ref() {
+        align_owner_with_openclaw_path(&skill.path, openclaw_path)?;
+    }
+    tui::print_step_done(8, TOTAL_STEPS, "OpenClaw config updated");
+    Ok(())
+}
+
+/// Steps 6, 7, 8 of the onboarding wizard when the user picked Hermes as
+/// the downstream agent target. Installs the email skill (if email is
+/// enabled) into the user's `~/.hermes/skills/` tree, then runs
+/// `hermes config set` to point Hermes at ClawShell.
+///
+/// Steps 7 and 8a ("backup OpenClaw" / "preview OpenClaw edits") are
+/// rendered as neutral info lines so the overall 9-step numbering stays
+/// aligned with the OpenClaw flow.
+fn apply_hermes_onboarding_steps(
+    ob_config: &crate::onboard::OnboardConfig,
+) -> Result<(), Box<dyn Error>> {
+    const TOTAL_STEPS: usize = ONBOARD_TOTAL_STEPS;
+
+    // Step 6: Write Hermes skill files into ~/.hermes/skills/ if email enabled.
+    tui::print_step(6, TOTAL_STEPS, "Hermes skill setup...");
+    if onboard::should_setup_email_skill(ob_config) {
+        match write_onboard_hermes_skill(ob_config) {
+            Ok(Some(path)) => {
+                tui::print_step_done(6, TOTAL_STEPS, "Hermes skill written");
+                tui::print_info("Hermes skill", &path.display().to_string());
+            }
+            Ok(None) => {
+                tui::print_step_done(6, TOTAL_STEPS, "Hermes skill skipped");
+            }
+            Err(error) => {
+                tui::print_error(&format!("Failed to write Hermes skill: {error}"));
+                tui::print_step_done(
+                    6,
+                    TOTAL_STEPS,
+                    "Hermes skill skipped (write failed — see error above)",
+                );
+            }
+        }
+    } else {
+        tui::print_step_done(
+            6,
+            TOTAL_STEPS,
+            "Hermes skills skipped (email integration not configured)",
+        );
+    }
+
+    // Step 7: Not applicable for Hermes (no backup needed — hermes config set
+    // is reversible and we never touch openclaw.json).
+    tui::print_step(7, TOTAL_STEPS, "Backup step...");
+    tui::print_step_done(
+        7,
+        TOTAL_STEPS,
+        "Backup not applicable for Hermes target (skipped)",
+    );
+
+    // Step 8: Apply Hermes config updates via `hermes config set`.
+    tui::print_step(8, TOTAL_STEPS, "Applying Hermes updates...");
+    tui::print_info("Hermes Agent", "configuring via `hermes config set`...");
+    let mut hermes_runner = hermes_cli::RealHermesRunner;
+    match hermes_cli::apply_onboard_hermes_config(&mut hermes_runner, ob_config) {
+        Ok(()) => {
+            tui::print_step_done(8, TOTAL_STEPS, "Hermes config updated");
+        }
+        Err(error) => {
+            tui::print_error(&format!(
+                "Failed to configure Hermes Agent: {error}. \
+                 You can retry later with `hermes config set model.provider custom` \
+                 and related keys."
+            ));
+            return Err(
+                format!("Hermes onboarding failed during `hermes config set`: {error}").into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     use crate::onboard;
 
-    const TOTAL_STEPS: usize = 9;
+    const TOTAL_STEPS: usize = ONBOARD_TOTAL_STEPS;
 
     tui::print_banner("Onboarding");
 
@@ -1105,7 +1422,7 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     let toml_content = onboard::generate_clawshell_config(&ob_config);
     std::fs::write(&toml_config_path, &toml_content)?;
 
-    let config_json = match &ob_config.auth_method {
+    let mut config_json = match &ob_config.auth_method {
         crate::onboard::OnboardAuthMethod::OAuth { provider_id } => {
             serde_json::json!({
                 "auth_method": "oauth",
@@ -1113,7 +1430,7 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
                 "virtual_api_key": ob_config.virtual_api_key,
                 "provider": ob_config.provider,
                 "model": ob_config.model,
-                "openclaw_config_path": ob_config.openclaw_config_path.to_string_lossy(),
+                "target": ob_config.target.as_str(),
             })
         }
         crate::onboard::OnboardAuthMethod::StaticKey => {
@@ -1122,10 +1439,14 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
                 "virtual_api_key": ob_config.virtual_api_key,
                 "provider": ob_config.provider,
                 "model": ob_config.model,
-                "openclaw_config_path": ob_config.openclaw_config_path.to_string_lossy(),
+                "target": ob_config.target.as_str(),
             })
         }
     };
+    if let crate::onboard::OnboardTarget::Openclaw { config_path } = &ob_config.target {
+        config_json["openclaw_config_path"] =
+            serde_json::Value::String(config_path.to_string_lossy().into_owned());
+    }
     std::fs::write(&config_file, serde_json::to_string_pretty(&config_json)?)?;
 
     // Set permissions on config files
@@ -1159,164 +1480,18 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     }
     tui::print_step_done(5, TOTAL_STEPS, "Configuration written");
 
-    // Step 6: Write OpenClaw skill files
-    tui::print_step(6, TOTAL_STEPS, "OpenClaw skill setup...");
-    println!();
-    let openclaw_skill = if onboard::should_setup_openclaw_email_skill(&ob_config) {
-        let openclaw_skill_edit_approved =
-            tui::prompt_confirm("Write OpenClaw skill files for email integration", true)?;
-        let openclaw_skill = if openclaw_skill_edit_approved {
-            write_onboard_openclaw_skill(&ob_config)?
-        } else {
-            None
-        };
-        if openclaw_skill_edit_approved {
-            if let Some(skill) = openclaw_skill.as_ref() {
-                onboard::upsert_managed_skill_manifest_entry(&config_file, &skill.manifest_entry)?;
-                tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills written");
-                tui::print_info("OpenClaw skill", &skill.path.display().to_string());
-            } else {
-                tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills skipped");
-            }
-        } else {
-            tui::print_step_done(
-                6,
-                TOTAL_STEPS,
-                "OpenClaw skills skipped (approval not granted)",
-            );
+    // Steps 6, 7, 8 — target-specific. The downstream agent chosen during
+    // step 4 (OpenClaw or Hermes) drives which set of actions runs here.
+    match &ob_config.target {
+        crate::onboard::OnboardTarget::Openclaw {
+            config_path: openclaw_path,
+        } => {
+            apply_openclaw_onboarding_steps(&ob_config, openclaw_path, &config_file)?;
         }
-        openclaw_skill
-    } else {
-        tui::print_step_done(
-            6,
-            TOTAL_STEPS,
-            "OpenClaw skills skipped (email integration not configured)",
-        );
-        None
-    };
-
-    // OpenClaw config path was already asked in step 4
-    let openclaw_path = &ob_config.openclaw_config_path;
-
-    // Step 7: Backup OpenClaw configuration file if present.
-    tui::print_step(7, TOTAL_STEPS, "Backing up OpenClaw configuration...");
-    if openclaw_path.exists() {
-        let backup = onboard::backup_openclaw_config(openclaw_path)?;
-        tui::print_step_done(7, TOTAL_STEPS, "OpenClaw config backed up");
-        tui::print_info("Backup", &backup.display().to_string());
-        print_openclaw_recovery_notice(openclaw_path, &backup);
-    } else {
-        tui::print_step_done(7, TOTAL_STEPS, "OpenClaw config backup skipped");
-        tui::print_warning(&format!(
-            "OpenClaw config not found at: {}",
-            openclaw_path.display()
-        ));
+        crate::onboard::OnboardTarget::Hermes => {
+            apply_hermes_onboarding_steps(&ob_config)?;
+        }
     }
-
-    // Step 8: Remove legacy provider credentials and update OpenClaw config.
-    tui::print_step(8, TOTAL_STEPS, "OpenClaw update setup...");
-    let openclaw_state_dir = onboard::openclaw_config_root(openclaw_path);
-    println!();
-    let cleanup_preview = onboard::preview_openclaw_provider_credential_cleanup(
-        &openclaw_state_dir,
-        &ob_config.real_api_key,
-    )?;
-    let config_mutation_preview = match build_openclaw_config_mutation_preview(
-        openclaw_path,
-        &ob_config,
-    ) {
-        Ok(preview) => preview,
-        Err(error) => {
-            warn!(
-                error = %error,
-                path = %openclaw_path.display(),
-                "Failed to build exact OpenClaw config mutation preview; showing fallback payload"
-            );
-            fallback_openclaw_config_mutation_preview(&ob_config)
-        }
-    };
-    tui::print_info(
-        "OpenClaw state dir",
-        &openclaw_state_dir.display().to_string(),
-    );
-    tui::print_info("OpenClaw config path", &openclaw_path.display().to_string());
-    tui::print_info(
-        "Mapped-key policy",
-        "Only entries matching the mapped virtual-key target will be removed",
-    );
-    if cleanup_preview.state_dir_exists {
-        if let Some(dot_env) = cleanup_preview.dot_env.as_ref() {
-            print_openclaw_cleanup_file_preview(dot_env);
-        }
-        for auth_profile in &cleanup_preview.auth_profiles {
-            print_openclaw_cleanup_file_preview(auth_profile);
-        }
-        if let Some(oauth) = cleanup_preview.oauth.as_ref() {
-            print_openclaw_cleanup_file_preview(oauth);
-        }
-        if !cleanup_preview.has_changes() {
-            tui::print_info("State-dir edits", "none (no mapped-key match)");
-        }
-    } else {
-        tui::print_warning(&format!(
-            "OpenClaw state dir not found: {}",
-            openclaw_state_dir.display()
-        ));
-    }
-    print_openclaw_config_mutation_preview(&config_mutation_preview)?;
-    let openclaw_edit_approved = tui::prompt_confirm(
-        "Proceed with the exact OpenClaw edits shown above (backups first)",
-        true,
-    )?;
-    if !openclaw_edit_approved {
-        tui::print_step_done(
-            8,
-            TOTAL_STEPS,
-            "OpenClaw update skipped (approval not granted)",
-        );
-        return Err("Onboarding aborted: OpenClaw edit approval was not granted.".into());
-    }
-
-    tui::print_step(8, TOTAL_STEPS, "Applying OpenClaw updates...");
-    // Step status renders inline; break once before interactive OpenClaw approvals.
-    println!();
-    let cleanup = onboard::cleanup_openclaw_provider_credentials(
-        &openclaw_state_dir,
-        &ob_config.real_api_key,
-    )?;
-    if cleanup.has_changes() {
-        tui::print_info("Legacy credential cleanup", "applied");
-        tui::print_info(
-            "Env entries removed",
-            &cleanup.dot_env_entries_removed.to_string(),
-        );
-        tui::print_info(
-            "Auth profiles updated",
-            &cleanup.auth_profile_files_updated.to_string(),
-        );
-        tui::print_info(
-            "Auth profile entries removed",
-            &cleanup.auth_profile_entries_removed.to_string(),
-        );
-        tui::print_info(
-            "OAuth entries removed",
-            &cleanup.oauth_entries_removed.to_string(),
-        );
-        tui::print_info(
-            "Backup files created",
-            &cleanup.backup_files_created.to_string(),
-        );
-    }
-    let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
-    tui::print_info(
-        "OpenClaw workaround",
-        "Temporarily setting `gateway.reload.mode` to `off` during config updates, then restoring `hybrid`.",
-    );
-    openclaw_cli::apply_onboard_openclaw_config(&mut openclaw_runner, &ob_config)?;
-    if let Some(skill) = openclaw_skill.as_ref() {
-        align_owner_with_openclaw_path(&skill.path, openclaw_path)?;
-    }
-    tui::print_step_done(8, TOTAL_STEPS, "OpenClaw config updated");
 
     // Auto-start service setup (ask before step 9 so we can start via service manager)
     let exe = std::env::current_exe()?;
@@ -1391,7 +1566,15 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
         &format!("http://{}:{}", ob_config.server_host, ob_config.server_port),
     );
     tui::print_info("Config", &toml_config_path.display().to_string());
-    tui::print_info("OpenClaw", &openclaw_path.display().to_string());
+    match &ob_config.target {
+        crate::onboard::OnboardTarget::Openclaw { config_path } => {
+            tui::print_info("Target", "OpenClaw");
+            tui::print_info("OpenClaw config", &config_path.display().to_string());
+        }
+        crate::onboard::OnboardTarget::Hermes => {
+            tui::print_info("Target", "Hermes Agent");
+        }
+    }
     println!();
     if already_running {
         tui::print_success("ClawShell configuration updated.");
@@ -1426,60 +1609,69 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Ask whether to set default model to clawshell
-    println!();
-    let set_model = tui::prompt_confirm(
-        "Run `openclaw models set clawshell` to set the default model to the ClawShell proxy?",
-        true,
-    )
-    .unwrap_or(false);
+    // OpenClaw-only post-step prompts: set default model + restart gateway.
+    // These only apply when the onboard target was OpenClaw — skip entirely
+    // for the Hermes target.
+    if matches!(
+        ob_config.target,
+        crate::onboard::OnboardTarget::Openclaw { .. }
+    ) {
+        println!();
+        let set_model = tui::prompt_confirm(
+            "Run `openclaw models set clawshell` to set the default model to the ClawShell proxy?",
+            true,
+        )
+        .unwrap_or(false);
 
-    if set_model {
-        let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
-        match openclaw_cli::run_openclaw_command(
-            &mut openclaw_runner,
-            &["models", "set", "clawshell"],
-        ) {
-            Ok(output) if output.success => tui::print_success("Default model set to clawshell."),
-            Ok(output) => tui::print_error(&format!(
-                "Failed to set default model (exit code {}).",
-                output.status_code.unwrap_or(-1)
-            )),
-            Err(error) => tui::print_error(&format!(
-                "Failed to run 'openclaw models set clawshell': {error}"
-            )),
+        if set_model {
+            let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
+            match openclaw_cli::run_openclaw_command(
+                &mut openclaw_runner,
+                &["models", "set", "clawshell"],
+            ) {
+                Ok(output) if output.success => {
+                    tui::print_success("Default model set to clawshell.")
+                }
+                Ok(output) => tui::print_error(&format!(
+                    "Failed to set default model (exit code {}).",
+                    output.status_code.unwrap_or(-1)
+                )),
+                Err(error) => tui::print_error(&format!(
+                    "Failed to run 'openclaw models set clawshell': {error}"
+                )),
+            }
+        } else {
+            tui::print_info(
+                "Skipped",
+                "You can set it later with: openclaw models set clawshell",
+            );
         }
-    } else {
-        tui::print_info(
-            "Skipped",
-            "You can set it later with: openclaw models set clawshell",
-        );
-    }
 
-    // Ask whether to restart the gateway
-    let restart_gw = tui::prompt_confirm(
-        "Run `openclaw gateway restart` to apply the new configuration?",
-        true,
-    )
-    .unwrap_or(false);
+        let restart_gw = tui::prompt_confirm(
+            "Run `openclaw gateway restart` to apply the new configuration?",
+            true,
+        )
+        .unwrap_or(false);
 
-    if restart_gw {
-        let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
-        match openclaw_cli::run_openclaw_command(&mut openclaw_runner, &["gateway", "restart"]) {
-            Ok(output) if output.success => tui::print_success("OpenClaw gateway restarted."),
-            Ok(output) => tui::print_error(&format!(
-                "Failed to restart gateway (exit code {}).",
-                output.status_code.unwrap_or(-1)
-            )),
-            Err(error) => tui::print_error(&format!(
-                "Failed to run 'openclaw gateway restart': {error}"
-            )),
+        if restart_gw {
+            let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
+            match openclaw_cli::run_openclaw_command(&mut openclaw_runner, &["gateway", "restart"])
+            {
+                Ok(output) if output.success => tui::print_success("OpenClaw gateway restarted."),
+                Ok(output) => tui::print_error(&format!(
+                    "Failed to restart gateway (exit code {}).",
+                    output.status_code.unwrap_or(-1)
+                )),
+                Err(error) => tui::print_error(&format!(
+                    "Failed to run 'openclaw gateway restart': {error}"
+                )),
+            }
+        } else {
+            tui::print_info(
+                "Skipped",
+                "You can restart later with: openclaw gateway restart",
+            );
         }
-    } else {
-        tui::print_info(
-            "Skipped",
-            "You can restart later with: openclaw gateway restart",
-        );
     }
 
     Ok(())
@@ -1526,12 +1718,12 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     let openclaw_skill_dir = openclaw_path.as_ref().map(|path| {
         onboard::openclaw_config_root(path)
             .join("skills")
-            .join(onboard::OPENCLAW_EMAIL_MESSAGES_SKILL_NAME)
+            .join(onboard::EMAIL_MESSAGES_SKILL_NAME)
     });
     let openclaw_skill_manifest = if clawshell_config_file.exists() {
         onboard::read_managed_skill_manifest_entry(
             &clawshell_config_file,
-            onboard::OPENCLAW_EMAIL_MESSAGES_SKILL_NAME,
+            onboard::EMAIL_MESSAGES_SKILL_NAME,
         )
     } else {
         None
@@ -1539,7 +1731,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     let openclaw_skill_inspection = if let Some(skill_dir) = openclaw_skill_dir.as_ref() {
         onboard::inspect_managed_skill_for_uninstall(
             skill_dir,
-            onboard::OPENCLAW_EMAIL_MESSAGES_SKILL_NAME,
+            onboard::EMAIL_MESSAGES_SKILL_NAME,
             openclaw_skill_manifest.as_ref(),
         )
     } else {

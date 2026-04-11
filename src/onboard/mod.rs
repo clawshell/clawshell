@@ -2,6 +2,7 @@ mod autostart;
 mod backup;
 mod config_render;
 mod credentials;
+mod hermes_config;
 mod interactive;
 mod managed_skills;
 mod openclaw_json;
@@ -20,6 +21,7 @@ pub use config_render::generate_clawshell_config;
 pub use credentials::{
     cleanup_openclaw_provider_credentials, preview_openclaw_provider_credential_cleanup,
 };
+pub use hermes_config::hermes_config_set_commands;
 pub use interactive::collect_onboard_config_tui;
 pub use managed_skills::{
     ManagedSkillInspection, ManagedSkillManifestEntry, ManagedSkillUninstallState,
@@ -28,8 +30,8 @@ pub use managed_skills::{
     upsert_managed_skill_manifest_entry, write_managed_skill_metadata,
 };
 pub use openclaw_json::{patch_openclaw_config_for_clawshell, remove_clawshell_openclaw_entries};
-pub use skills::{render_openclaw_email_messages_skill, should_setup_openclaw_email_skill};
+pub use skills::{render_email_messages_skill, should_setup_email_skill};
 pub use types::{
-    OPENCLAW_EMAIL_MESSAGES_SKILL_NAME, OnboardAuthMethod, OnboardConfig,
+    EMAIL_MESSAGES_SKILL_NAME, OnboardAuthMethod, OnboardConfig, OnboardTarget,
     OpenclawFileRemovalPreview,
 };

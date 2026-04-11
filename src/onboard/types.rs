@@ -54,6 +54,30 @@ pub enum OnboardAuthMethod {
     },
 }
 
+/// Which downstream LLM client ClawShell's onboarding wizard should wire
+/// through the proxy. Exactly one target per onboard run — the previous
+/// "configure Hermes on top of OpenClaw" additive mode has been removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnboardTarget {
+    /// Route OpenClaw through ClawShell by patching `~/.openclaw/openclaw.json`.
+    Openclaw {
+        /// Path to the OpenClaw configuration file (usually `~/.openclaw/openclaw.json`).
+        config_path: PathBuf,
+    },
+    /// Route Hermes Agent through ClawShell by running `hermes config set`.
+    Hermes,
+}
+
+impl OnboardTarget {
+    /// Stable short identifier used as a discriminator in `config.json`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OnboardTarget::Openclaw { .. } => "openclaw",
+            OnboardTarget::Hermes => "hermes",
+        }
+    }
+}
+
 /// Collected onboarding configuration from user prompts.
 #[derive(Debug, Clone)]
 pub struct OnboardConfig {
@@ -63,7 +87,8 @@ pub struct OnboardConfig {
     /// Set for `StaticKey`; empty for `OAuth`.
     pub real_api_key: String,
     pub virtual_api_key: String,
-    pub openclaw_config_path: PathBuf,
+    /// Which downstream LLM client to wire through ClawShell.
+    pub target: OnboardTarget,
     pub server_host: String,
     pub server_port: u16,
     pub email: Option<OnboardEmailConfig>,
@@ -93,7 +118,7 @@ pub struct OnboardSkillBundle {
     pub files: Vec<OnboardSkillFile>,
 }
 
-pub const OPENCLAW_EMAIL_MESSAGES_SKILL_NAME: &str = "get-email-messages";
+pub const EMAIL_MESSAGES_SKILL_NAME: &str = "get-email-messages";
 
 /// Sender filtering mode for the Email endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

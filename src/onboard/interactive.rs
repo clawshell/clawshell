@@ -1,6 +1,8 @@
 use super::config_render::default_openclaw_config_path;
 use super::credentials::detect_openclaw_api_key_for_provider;
-use super::types::{OnboardAuthMethod, OnboardConfig, OnboardEmailConfig, OnboardEmailMode};
+use super::types::{
+    OnboardAuthMethod, OnboardConfig, OnboardEmailConfig, OnboardEmailMode, OnboardTarget,
+};
 use crate::email::{EmailAccountCredentials, ImapEmailService};
 use crate::tui;
 
@@ -75,6 +77,10 @@ fn load_existing_config_from_vfs(config_dir: &VfsPath) -> Option<ExistingConfig>
             .map(String::from);
         existing.oauth_provider = json
             .get("oauth_provider")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        existing.target = json
+            .get("target")
             .and_then(|v| v.as_str())
             .map(String::from);
     }
@@ -277,6 +283,10 @@ struct ExistingConfig {
     email_app_password: Option<String>,
     email_imap_host: Option<String>,
     email_imap_port: Option<u16>,
+    /// Target agent string from config.json ("openclaw" or "hermes"). None
+    /// when no prior onboarding run has been recorded, or when the config
+    /// predates the exclusive-target rework.
+    target: Option<String>,
 }
 
 impl ExistingConfig {
@@ -298,6 +308,7 @@ impl ExistingConfig {
             || self.email_app_password.is_some()
             || self.email_imap_host.is_some()
             || self.email_imap_port.is_some()
+            || self.target.is_some()
     }
 }
 
@@ -422,6 +433,16 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
 
     let existing = existing.unwrap_or_default();
 
+    // Agent target selection — always ask, no default preselection. Exactly
+    // one downstream agent is wired per onboard run.
+    const TARGET_OPENCLAW: &str = "OpenClaw";
+    const TARGET_HERMES: &str = "Hermes Agent";
+    tui::print_section("Agent Target");
+    let target_choice = tui::prompt_select(
+        "Which downstream agent should ClawShell wire through?",
+        vec![TARGET_OPENCLAW, TARGET_HERMES],
+    )?;
+
     tui::print_section("API Configuration");
 
     // Provider selection
@@ -507,10 +528,8 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
         .virtual_api_key
         .as_deref()
         .unwrap_or(&fallback_virtual_key);
-    let virtual_api_key = tui::prompt_text(
-        "Enter the virtual API key for OpenClaw",
-        Some(default_virtual),
-    )?;
+    let virtual_api_key =
+        tui::prompt_text("Enter the ClawShell virtual API key", Some(default_virtual))?;
 
     tui::print_section("email configuration");
 
@@ -778,18 +797,21 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
         None
     };
 
-    tui::print_section("OpenClaw Configuration");
+    let openclaw_config_path = if target_choice == TARGET_OPENCLAW {
+        tui::print_section("OpenClaw Configuration");
 
-    // OpenClaw config path
-    let fallback_openclaw_path = default_openclaw_config_path();
-    let default_openclaw = existing
-        .openclaw_config_path
-        .as_deref()
-        .unwrap_or(&fallback_openclaw_path);
-    let openclaw_config_path = tui::prompt_text(
-        "Enter the OpenClaw configuration file path (for backup/recovery)",
-        Some(default_openclaw),
-    )?;
+        let fallback_openclaw_path = default_openclaw_config_path();
+        let default_openclaw = existing
+            .openclaw_config_path
+            .as_deref()
+            .unwrap_or(&fallback_openclaw_path);
+        Some(tui::prompt_text(
+            "Enter the OpenClaw configuration file path (for backup/recovery)",
+            Some(default_openclaw),
+        )?)
+    } else {
+        None
+    };
 
     // Server settings
     let default_host = existing.server_host.as_deref().unwrap_or("127.0.0.1");
@@ -810,13 +832,24 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
     )?;
     let server_port: u16 = server_port_str.parse().unwrap();
 
+    let target = match target_choice {
+        TARGET_OPENCLAW => OnboardTarget::Openclaw {
+            config_path: PathBuf::from(
+                openclaw_config_path
+                    .expect("openclaw_config_path is populated when target is OpenClaw"),
+            ),
+        },
+        TARGET_HERMES => OnboardTarget::Hermes,
+        other => unreachable!("unexpected target choice: {other}"),
+    };
+
     Ok(OnboardConfig {
         provider,
         model,
         auth_method,
         real_api_key,
         virtual_api_key,
-        openclaw_config_path: PathBuf::from(openclaw_config_path),
+        target,
         server_host,
         server_port,
         email,
@@ -971,6 +1004,91 @@ mod tests {
         );
         assert_eq!(existing.server_host.as_deref(), Some("0.0.0.0"));
         assert_eq!(existing.server_port.as_deref(), Some("9999"));
+    }
+
+    #[test]
+    fn test_load_existing_config_reads_openclaw_target() {
+        let root = VfsPath::new(MemoryFS::new());
+        let config_json = serde_json::json!({
+            "target": "openclaw",
+            "provider": "openai",
+            "model": "gpt-5.2",
+            "virtual_api_key": "vk",
+            "real_api_key": "sk",
+            "openclaw_config_path": "/home/user/.openclaw/openclaw.json",
+        });
+        vfs_write(
+            &root,
+            "etc/clawshell/config.json",
+            &serde_json::to_string_pretty(&config_json).unwrap(),
+        );
+        vfs_write(
+            &root,
+            "etc/clawshell/clawshell.toml",
+            "[server]\nhost = \"127.0.0.1\"\nport = 18790\n",
+        );
+
+        let existing = load_existing_config_from_vfs(&root.join("etc/clawshell").unwrap()).unwrap();
+        assert_eq!(existing.target.as_deref(), Some("openclaw"));
+    }
+
+    #[test]
+    fn test_load_existing_config_reads_hermes_target() {
+        let root = VfsPath::new(MemoryFS::new());
+        let config_json = serde_json::json!({
+            "target": "hermes",
+            "provider": "openai",
+            "model": "gpt-5.2",
+            "virtual_api_key": "vk",
+            "real_api_key": "sk",
+        });
+        vfs_write(
+            &root,
+            "etc/clawshell/config.json",
+            &serde_json::to_string_pretty(&config_json).unwrap(),
+        );
+        vfs_write(
+            &root,
+            "etc/clawshell/clawshell.toml",
+            "[server]\nhost = \"127.0.0.1\"\nport = 18790\n",
+        );
+
+        let existing = load_existing_config_from_vfs(&root.join("etc/clawshell").unwrap()).unwrap();
+        assert_eq!(existing.target.as_deref(), Some("hermes"));
+        // Hermes target has no openclaw_config_path persisted.
+        assert!(existing.openclaw_config_path.is_none());
+    }
+
+    #[test]
+    fn test_load_existing_config_missing_target_is_none_backward_compat() {
+        let root = VfsPath::new(MemoryFS::new());
+        // Pre-rework config.json — no `target` key. Loader should return
+        // None and let the wizard re-prompt on next onboard run.
+        let config_json = serde_json::json!({
+            "provider": "openai",
+            "model": "gpt-5.2",
+            "virtual_api_key": "vk",
+            "real_api_key": "sk",
+            "openclaw_config_path": "/home/user/.openclaw/openclaw.json",
+        });
+        vfs_write(
+            &root,
+            "etc/clawshell/config.json",
+            &serde_json::to_string_pretty(&config_json).unwrap(),
+        );
+        vfs_write(
+            &root,
+            "etc/clawshell/clawshell.toml",
+            "[server]\nhost = \"127.0.0.1\"\nport = 18790\n",
+        );
+
+        let existing = load_existing_config_from_vfs(&root.join("etc/clawshell").unwrap()).unwrap();
+        assert!(existing.target.is_none());
+        // Older openclaw_config_path key is still read for its own prompt default.
+        assert_eq!(
+            existing.openclaw_config_path.as_deref(),
+            Some("/home/user/.openclaw/openclaw.json")
+        );
     }
 
     #[test]

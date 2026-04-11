@@ -51,7 +51,7 @@ ClawShell supports OAuth-based authentication as an alternative to static API ke
 
 ### 5. Seamless Integration
 
-- **Drop-in Sidecar**: Deploys alongside OpenClaw without requiring re-install — the `clawshell onboard` command automatically configures OpenClaw to point at ClawShell's address and forwards all requests upstream.
+- **Drop-in Sidecar**: The `clawshell onboard` wizard configures exactly one downstream LLM client per run — either OpenClaw or [Hermes Agent](https://github.com/NousResearch/hermes-agent) — to route all requests through ClawShell's proxy. See [Agent Target (pick one)](#agent-target-pick-one).
 - **No External Dependencies**: Uses Unix file system permissions to protect secrets. No IdP, Vault, or external key management service required.
 
 ### 6. Ultra Lightweight and Scalable
@@ -140,12 +140,13 @@ cargo build --release --target x86_64-unknown-linux-musl
 
 The `onboard` command is an interactive setup wizard that must be run with `sudo`. It:
 
-1. Creates the `clawshell` system user.
-2. Creates and secures `/etc/clawshell` (mode 700) and `/var/log/clawshell`.
-3. Walks you through provider selection, API key entry, and virtual key generation.
-4. Writes the ClawShell config to `/etc/clawshell/clawshell.toml`.
-5. Updates your OpenClaw configuration to route through ClawShell.
-6. Starts the ClawShell daemon.
+1. Asks which downstream agent to wire through ClawShell — **OpenClaw** or **Hermes Agent** (exactly one per run).
+2. Creates the `clawshell` system user.
+3. Creates and secures `/etc/clawshell` (mode 700) and `/var/log/clawshell`.
+4. Walks you through provider selection, API key entry, and virtual key generation.
+5. Writes the ClawShell config to `/etc/clawshell/clawshell.toml`.
+6. Wires the chosen agent through ClawShell (patches `~/.openclaw/openclaw.json` for OpenClaw, or runs `hermes config set` for Hermes).
+7. Starts the ClawShell daemon.
 
 ```bash
 sudo clawshell onboard
@@ -294,6 +295,68 @@ sudo clawshell migrate-config --config /etc/clawshell/clawshell.toml
 ```
 
 See [`clawshell.example.toml`](clawshell.example.toml) for a full example.
+
+### Agent Target (pick one)
+
+`sudo clawshell onboard` begins with a single, mandatory choice:
+
+```
+=== Agent Target ===
+? Which downstream agent should ClawShell wire through?
+  > OpenClaw
+    Hermes Agent
+```
+
+Each onboard run configures **exactly one** downstream client. There's no "also configure the other one" path — switching later means re-running `sudo clawshell onboard` and picking the other target. The prompt has no default preselection, so you pick explicitly every time.
+
+#### OpenClaw target
+
+When you pick OpenClaw, the wizard:
+
+- Backs up `~/.openclaw/openclaw.json` (numbered `.bak` files, mode 000).
+- Shells out to `openclaw config set` to patch three paths: `env.CLAWSHELL_API_KEY`, `agents.defaults.models.clawshell/<model>`, and `models.providers.clawshell`.
+- Writes a `get-email-messages` skill bundle to `<openclaw_root>/skills/` when email integration is enabled.
+- Offers to run `openclaw models set clawshell` and `openclaw gateway restart` at the end.
+
+This is the historical onboarding flow and is unchanged by the target-selection rework.
+
+#### Hermes Agent target
+
+When you pick [Hermes Agent](https://github.com/NousResearch/hermes-agent), the wizard:
+
+- Skips every OpenClaw step — `~/.openclaw/` is **not** touched.
+- Writes a `get-email-messages` skill bundle to `~/.hermes/skills/` (owned by your invoking user, not root) when email integration is enabled. Hermes auto-discovers skills from that directory.
+- Shells out to `hermes config set` to write:
+
+  | Key | Value |
+  |---|---|
+  | `model.provider` | `custom` |
+  | `model.base_url` | `http://<server_host>:<server_port>/v1` |
+  | `model.default`  | the model ID you chose during onboard |
+  | `model.api_key`  | your ClawShell **virtual** key (never the real upstream key) |
+
+The `hermes` binary must be on your `PATH`. ClawShell drops root privileges before invoking it so writes land under your normal user account, not root's.
+
+#### Manual Hermes configuration
+
+If you'd rather skip the wizard's Hermes integration, run the equivalent commands from your user account (not root):
+
+```bash
+hermes config set model.provider custom
+hermes config set model.base_url http://127.0.0.1:18790/v1
+hermes config set model.default  <your-model-id>
+hermes config set model.api_key  <your-clawshell-virtual-key>
+```
+
+Then verify with `hermes config show`.
+
+#### Reverting Hermes
+
+Hermes has no `config unset` subcommand. To detach Hermes from ClawShell, set the provider back to auto-detect and Hermes will pick another upstream based on the credentials it still has:
+
+```bash
+hermes config set model.provider auto
+```
 
 ### Uninstall
 
