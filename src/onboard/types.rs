@@ -119,6 +119,7 @@ pub struct OnboardSkillBundle {
 }
 
 pub const EMAIL_MESSAGES_SKILL_NAME: &str = "get-email-messages";
+pub const ADMIN_STATS_SKILL_NAME: &str = "get-clawshell-stats";
 
 /// Sender filtering mode for the Email endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

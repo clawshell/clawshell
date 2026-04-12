@@ -30,8 +30,8 @@ pub use managed_skills::{
     upsert_managed_skill_manifest_entry, write_managed_skill_metadata,
 };
 pub use openclaw_json::{patch_openclaw_config_for_clawshell, remove_clawshell_openclaw_entries};
-pub use skills::{render_email_messages_skill, should_setup_email_skill};
+pub use skills::{render_admin_stats_skill, render_email_messages_skill};
 pub use types::{
-    EMAIL_MESSAGES_SKILL_NAME, OnboardAuthMethod, OnboardConfig, OnboardTarget,
-    OpenclawFileRemovalPreview,
+    ADMIN_STATS_SKILL_NAME, EMAIL_MESSAGES_SKILL_NAME, OnboardAuthMethod, OnboardConfig,
+    OnboardSkillBundle, OnboardTarget, OpenclawFileRemovalPreview,
 };

@@ -129,14 +129,12 @@ struct WrittenOpenclawSkill {
     manifest_entry: onboard::ManagedSkillManifestEntry,
 }
 
-fn write_onboard_openclaw_skill(
-    ob_config: &crate::onboard::OnboardConfig,
+/// Write a single ClawShell-managed skill bundle into
+/// `<openclaw_root>/skills/<skill_name>/` and return its manifest entry.
+fn write_openclaw_skill_bundle(
+    skill: onboard::OnboardSkillBundle,
     openclaw_config_path: &Path,
-) -> Result<Option<WrittenOpenclawSkill>, Box<dyn Error>> {
-    let Some(skill) = onboard::render_email_messages_skill(ob_config) else {
-        return Ok(None);
-    };
-
+) -> Result<WrittenOpenclawSkill, Box<dyn Error>> {
     let openclaw_root = onboard::openclaw_config_root(openclaw_config_path);
     let skill_dir = openclaw_root.join("skills").join(skill.name);
     std::fs::create_dir_all(&skill_dir)?;
@@ -163,10 +161,37 @@ fn write_onboard_openclaw_skill(
         );
     }
 
-    Ok(Some(WrittenOpenclawSkill {
+    Ok(WrittenOpenclawSkill {
         path: skill_dir,
         manifest_entry,
-    }))
+    })
+}
+
+/// Write every ClawShell-managed skill that applies to this onboarding
+/// run into OpenClaw's skills directory. The stats skill is always
+/// written; the email skill is written only when the onboarding config
+/// has email integration enabled. Returns the written skills in
+/// installation order.
+fn write_onboard_openclaw_skill(
+    ob_config: &crate::onboard::OnboardConfig,
+    openclaw_config_path: &Path,
+) -> Result<Vec<WrittenOpenclawSkill>, Box<dyn Error>> {
+    let mut written = Vec::new();
+
+    let stats_skill = onboard::render_admin_stats_skill(ob_config);
+    written.push(write_openclaw_skill_bundle(
+        stats_skill,
+        openclaw_config_path,
+    )?);
+
+    if let Some(email_skill) = onboard::render_email_messages_skill(ob_config) {
+        written.push(write_openclaw_skill_bundle(
+            email_skill,
+            openclaw_config_path,
+        )?);
+    }
+
+    Ok(written)
 }
 
 /// Resolve the home directory and uid:gid of the user running onboarding.
@@ -201,23 +226,15 @@ fn resolve_hermes_target_user() -> Result<(PathBuf, u32, u32), Box<dyn Error>> {
     Ok((home, 0, 0))
 }
 
-/// Write the ClawShell-managed email skill into the invoking user's
-/// `~/.hermes/skills/<skill_name>/` directory. Returns the install path
-/// when the skill was written, or `None` when the skill render function
-/// declined (e.g. email integration not configured).
-///
-/// Unlike `write_onboard_openclaw_skill`, this doesn't upsert a
-/// `managed_skills` manifest entry — Hermes discovers skills from its own
-/// `~/.hermes/skills/` tree directly and doesn't share OpenClaw's
-/// manifest bookkeeping.
-fn write_onboard_hermes_skill(
-    ob_config: &crate::onboard::OnboardConfig,
-) -> Result<Option<PathBuf>, Box<dyn Error>> {
-    let Some(skill) = onboard::render_email_messages_skill(ob_config) else {
-        return Ok(None);
-    };
-
-    let (home_dir, uid, gid) = resolve_hermes_target_user()?;
+/// Write a single ClawShell-managed skill bundle into
+/// `<home>/.hermes/skills/<skill_name>/` and chown the result to the
+/// invoking user.
+fn write_hermes_skill_bundle(
+    skill: onboard::OnboardSkillBundle,
+    home_dir: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<PathBuf, Box<dyn Error>> {
     let skill_dir = home_dir.join(".hermes").join("skills").join(skill.name);
     std::fs::create_dir_all(&skill_dir)?;
 
@@ -240,7 +257,32 @@ fn write_onboard_hermes_skill(
         );
     }
 
-    Ok(Some(skill_dir))
+    Ok(skill_dir)
+}
+
+/// Write every ClawShell-managed skill that applies to this onboarding
+/// run into `~/.hermes/skills/`. The stats skill is always written; the
+/// email skill is written only when email integration is enabled.
+///
+/// Unlike `write_onboard_openclaw_skill`, this doesn't upsert a
+/// `managed_skills` manifest entry — Hermes discovers skills from its own
+/// `~/.hermes/skills/` tree directly and doesn't share OpenClaw's
+/// manifest bookkeeping.
+fn write_onboard_hermes_skill(
+    ob_config: &crate::onboard::OnboardConfig,
+) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    let (home_dir, uid, gid) = resolve_hermes_target_user()?;
+
+    let mut written = Vec::new();
+
+    let stats_skill = onboard::render_admin_stats_skill(ob_config);
+    written.push(write_hermes_skill_bundle(stats_skill, &home_dir, uid, gid)?);
+
+    if let Some(email_skill) = onboard::render_email_messages_skill(ob_config) {
+        written.push(write_hermes_skill_bundle(email_skill, &home_dir, uid, gid)?);
+    }
+
+    Ok(written)
 }
 
 fn resolve_openclaw_owner_spec(openclaw_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
@@ -1114,40 +1156,27 @@ fn apply_openclaw_onboarding_steps(
 ) -> Result<(), Box<dyn Error>> {
     const TOTAL_STEPS: usize = ONBOARD_TOTAL_STEPS;
 
-    // Step 6: Write OpenClaw skill files
+    // Step 6: Write OpenClaw skill files. The stats skill is always
+    // installed; the email skill is added on top when email integration
+    // is configured for this onboarding.
     tui::print_step(6, TOTAL_STEPS, "OpenClaw skill setup...");
     println!();
-    let openclaw_skill = if onboard::should_setup_email_skill(ob_config) {
-        let openclaw_skill_edit_approved =
-            tui::prompt_confirm("Write OpenClaw skill files for email integration", true)?;
-        let openclaw_skill = if openclaw_skill_edit_approved {
-            write_onboard_openclaw_skill(ob_config, openclaw_path)?
-        } else {
-            None
-        };
-        if openclaw_skill_edit_approved {
-            if let Some(skill) = openclaw_skill.as_ref() {
-                onboard::upsert_managed_skill_manifest_entry(config_file, &skill.manifest_entry)?;
-                tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills written");
-                tui::print_info("OpenClaw skill", &skill.path.display().to_string());
-            } else {
-                tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills skipped");
-            }
-        } else {
-            tui::print_step_done(
-                6,
-                TOTAL_STEPS,
-                "OpenClaw skills skipped (approval not granted)",
-            );
+    let openclaw_skill_edit_approved = tui::prompt_confirm("Write OpenClaw skill files", true)?;
+    let openclaw_skills: Vec<WrittenOpenclawSkill> = if openclaw_skill_edit_approved {
+        let written = write_onboard_openclaw_skill(ob_config, openclaw_path)?;
+        for skill in &written {
+            onboard::upsert_managed_skill_manifest_entry(config_file, &skill.manifest_entry)?;
+            tui::print_info("OpenClaw skill", &skill.path.display().to_string());
         }
-        openclaw_skill
+        tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills written");
+        written
     } else {
         tui::print_step_done(
             6,
             TOTAL_STEPS,
-            "OpenClaw skills skipped (email integration not configured)",
+            "OpenClaw skills skipped (approval not granted)",
         );
-        None
+        Vec::new()
     };
 
     // Step 7: Backup OpenClaw configuration file if present.
@@ -1264,7 +1293,7 @@ fn apply_openclaw_onboarding_steps(
         "Temporarily setting `gateway.reload.mode` to `off` during config updates, then restoring `hybrid`.",
     );
     openclaw_cli::apply_onboard_openclaw_config(&mut openclaw_runner, ob_config)?;
-    if let Some(skill) = openclaw_skill.as_ref() {
+    for skill in &openclaw_skills {
         align_owner_with_openclaw_path(&skill.path, openclaw_path)?;
     }
     tui::print_step_done(8, TOTAL_STEPS, "OpenClaw config updated");
@@ -1272,9 +1301,10 @@ fn apply_openclaw_onboarding_steps(
 }
 
 /// Steps 6, 7, 8 of the onboarding wizard when the user picked Hermes as
-/// the downstream agent target. Installs the email skill (if email is
-/// enabled) into the user's `~/.hermes/skills/` tree, then runs
-/// `hermes config set` to point Hermes at ClawShell.
+/// the downstream agent target. Installs the ClawShell-managed skill
+/// bundles (stats always, email when configured) into the user's
+/// `~/.hermes/skills/` tree, then runs `hermes config set` to point
+/// Hermes at ClawShell.
 ///
 /// Steps 7 and 8a ("backup OpenClaw" / "preview OpenClaw edits") are
 /// rendered as neutral info lines so the overall 9-step numbering stays
@@ -1284,32 +1314,28 @@ fn apply_hermes_onboarding_steps(
 ) -> Result<(), Box<dyn Error>> {
     const TOTAL_STEPS: usize = ONBOARD_TOTAL_STEPS;
 
-    // Step 6: Write Hermes skill files into ~/.hermes/skills/ if email enabled.
+    // Step 6: Write Hermes skill files into ~/.hermes/skills/. The stats
+    // skill is always written; the email skill is written on top when
+    // email integration is configured.
     tui::print_step(6, TOTAL_STEPS, "Hermes skill setup...");
-    if onboard::should_setup_email_skill(ob_config) {
-        match write_onboard_hermes_skill(ob_config) {
-            Ok(Some(path)) => {
-                tui::print_step_done(6, TOTAL_STEPS, "Hermes skill written");
+    match write_onboard_hermes_skill(ob_config) {
+        Ok(paths) if paths.is_empty() => {
+            tui::print_step_done(6, TOTAL_STEPS, "Hermes skills skipped");
+        }
+        Ok(paths) => {
+            for path in &paths {
                 tui::print_info("Hermes skill", &path.display().to_string());
             }
-            Ok(None) => {
-                tui::print_step_done(6, TOTAL_STEPS, "Hermes skill skipped");
-            }
-            Err(error) => {
-                tui::print_error(&format!("Failed to write Hermes skill: {error}"));
-                tui::print_step_done(
-                    6,
-                    TOTAL_STEPS,
-                    "Hermes skill skipped (write failed — see error above)",
-                );
-            }
+            tui::print_step_done(6, TOTAL_STEPS, "Hermes skills written");
         }
-    } else {
-        tui::print_step_done(
-            6,
-            TOTAL_STEPS,
-            "Hermes skills skipped (email integration not configured)",
-        );
+        Err(error) => {
+            tui::print_error(&format!("Failed to write Hermes skills: {error}"));
+            tui::print_step_done(
+                6,
+                TOTAL_STEPS,
+                "Hermes skills skipped (write failed — see error above)",
+            );
+        }
     }
 
     // Step 7: Not applicable for Hermes (no backup needed — hermes config set
@@ -1740,28 +1766,36 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let openclaw_skill_dir = openclaw_path.as_ref().map(|path| {
-        onboard::openclaw_config_root(path)
-            .join("skills")
-            .join(onboard::EMAIL_MESSAGES_SKILL_NAME)
-    });
-    let openclaw_skill_manifest = if clawshell_config_file.exists() {
-        onboard::read_managed_skill_manifest_entry(
-            &clawshell_config_file,
-            onboard::EMAIL_MESSAGES_SKILL_NAME,
-        )
-    } else {
-        None
-    };
-    let openclaw_skill_inspection = if let Some(skill_dir) = openclaw_skill_dir.as_ref() {
-        onboard::inspect_managed_skill_for_uninstall(
-            skill_dir,
-            onboard::EMAIL_MESSAGES_SKILL_NAME,
-            openclaw_skill_manifest.as_ref(),
-        )
-    } else {
-        onboard::ManagedSkillInspection::missing()
-    };
+    // Build (skill_name, skill_dir, inspection) triples for every managed
+    // OpenClaw skill, so the preview and removal blocks can iterate. Stats
+    // is listed first so it's still cleaned up even if the email skill is
+    // absent (or vice-versa).
+    let openclaw_skill_entries: Vec<(&'static str, PathBuf, onboard::ManagedSkillInspection)> =
+        if let Some(openclaw_path) = openclaw_path.as_ref() {
+            let skills_root = onboard::openclaw_config_root(openclaw_path).join("skills");
+            [
+                onboard::ADMIN_STATS_SKILL_NAME,
+                onboard::EMAIL_MESSAGES_SKILL_NAME,
+            ]
+            .into_iter()
+            .map(|name| {
+                let skill_dir = skills_root.join(name);
+                let manifest = if clawshell_config_file.exists() {
+                    onboard::read_managed_skill_manifest_entry(&clawshell_config_file, name)
+                } else {
+                    None
+                };
+                let inspection = onboard::inspect_managed_skill_for_uninstall(
+                    &skill_dir,
+                    name,
+                    manifest.as_ref(),
+                );
+                (name, skill_dir, inspection)
+            })
+            .collect()
+        } else {
+            Vec::new()
+        };
 
     tui::print_warning("This will remove the following:");
     tui::print_info("ClawShell", "Stop if running");
@@ -1770,10 +1804,11 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     if service_exists {
         tui::print_info("Service", &service_path.display().to_string());
     }
-    if let Some(skill_dir) = openclaw_skill_dir.as_ref()
-        && skill_dir.exists()
-    {
-        match openclaw_skill_inspection.state {
+    for (_skill_name, skill_dir, inspection) in &openclaw_skill_entries {
+        if !skill_dir.exists() {
+            continue;
+        }
+        match inspection.state {
             onboard::ManagedSkillUninstallState::ManagedUnchanged => {
                 tui::print_info(
                     "OpenClaw skill",
@@ -1787,7 +1822,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 tui::print_warning(&format!(
                     "Managed OpenClaw skill has local modifications: {}",
-                    openclaw_skill_inspection.detail
+                    inspection.detail
                 ));
             }
             onboard::ManagedSkillUninstallState::Unmanaged => {
@@ -1797,7 +1832,7 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 tui::print_warning(&format!(
                     "Skill ownership is not verified: {}",
-                    openclaw_skill_inspection.detail
+                    inspection.detail
                 ));
             }
             onboard::ManagedSkillUninstallState::Missing => {}
@@ -1848,19 +1883,19 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 0b. Remove ClawShell-managed OpenClaw skill if present.
-    if let Some(skill_dir) = openclaw_skill_dir.as_ref()
-        && skill_dir.exists()
-    {
-        let remove_skill_dir = |path: &Path| match std::fs::remove_dir_all(path) {
-            Ok(()) => tui::print_success(&format!("OpenClaw skill removed: {}", path.display())),
-            Err(error) => tui::print_warning(&format!(
-                "Failed to remove OpenClaw skill at {}: {error}",
-                path.display()
-            )),
-        };
-
-        match openclaw_skill_inspection.state {
+    // 0b. Remove ClawShell-managed OpenClaw skills if present.
+    let remove_skill_dir = |path: &Path| match std::fs::remove_dir_all(path) {
+        Ok(()) => tui::print_success(&format!("OpenClaw skill removed: {}", path.display())),
+        Err(error) => tui::print_warning(&format!(
+            "Failed to remove OpenClaw skill at {}: {error}",
+            path.display()
+        )),
+    };
+    for (_skill_name, skill_dir, inspection) in &openclaw_skill_entries {
+        if !skill_dir.exists() {
+            continue;
+        }
+        match inspection.state {
             onboard::ManagedSkillUninstallState::ManagedUnchanged => {
                 let remove_skill = if skip_confirm {
                     true
