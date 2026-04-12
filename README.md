@@ -2,7 +2,7 @@
 
 ![ClawShell Banner](docs/images/banner.png)
 
-> **Powered by Runta. The essential safety harness for OpenClaw's PII & Sensitive Credentials.**
+> **Powered by Runta. The essential safety harness for OpenClaw/Hermes Agent's PII & Sensitive Credentials.**
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/clawshell/clawshell/rust.yml)](https://github.com/clawshell/clawshell/actions)
@@ -12,17 +12,17 @@
 
 ## 📖 Introduction
 
-**ClawShell** is a security-privileged process for the **OpenClaw** ecosystem. It sits between OpenClaw and upstream LLM API providers (OpenAI, Anthropic, OpenRouter), performing virtual-to-real API key mapping and DLP (Data Loss Prevention) scanning on request and response bodies. It can also expose an Email read endpoint with sender allowlist/denylist filtering.
+**ClawShell** is a security-privileged process for the **OpenClaw/Hermes Agent** ecosystem. It sits between OpenClaw/Hermes Agent and upstream LLM API providers (OpenAI, Anthropic, OpenRouter), performing virtual-to-real API key mapping and DLP (Data Loss Prevention) scanning on request and response bodies. It can also expose an Email read endpoint with sender allowlist/denylist filtering.
 
-OpenClaw never holds real API keys, only virtual keys that ClawShell swaps for real ones before forwarding requests upstream. Real keys are stored in a privileged config directory (`/etc/clawshell`) protected by Unix file system permissions.
+OpenClaw/Hermes Agent never holds real API keys, only virtual keys that ClawShell swaps for real ones before forwarding requests upstream. Real keys are stored in a privileged config directory (`/etc/clawshell`) protected by Unix file system permissions.
 
 ## Key Features
 
 ### 1. API Token Secure Binding
 
-ClawShell maps virtual API keys to real provider keys so that OpenClaw never has direct access to real credentials.
+ClawShell maps virtual API keys to real provider keys so that OpenClaw/Hermes Agent never has direct access to real credentials.
 
-- **Key Isolation**: Real API keys are stored in `/etc/clawshell/clawshell.toml`, readable only by the `clawshell` system user. OpenClaw holds only virtual keys.
+- **Key Isolation**: Real API keys are stored in `/etc/clawshell/clawshell.toml`, readable only by the `clawshell` system user. OpenClaw/Hermes Agent holds only virtual keys.
 - **Multi-Provider Support**: Maps keys to OpenAI or Anthropic, injecting the correct authentication header format (`Authorization: Bearer` for OpenAI, `x-api-key` for Anthropic).
 
 ### 2. PII Safety Net (DLP)
@@ -30,7 +30,7 @@ ClawShell maps virtual API keys to real provider keys so that OpenClaw never has
 ClawShell scans HTTP request and response bodies for sensitive data using configurable regex patterns.
 
 - **Request Scanning**: Detects PII (SSNs, credit card numbers, emails, etc.) in outbound requests. Patterns can be configured to either block the request or redact the matched text before forwarding.
-- **Response Scanning**: Optionally scans upstream responses and redacts detected PII before returning to OpenClaw. Streaming (SSE) responses are passed through without scanning.
+- **Response Scanning**: Optionally scans upstream responses and redacts detected PII before returning to OpenClaw/Hermes Agent. Streaming (SSE) responses are passed through without scanning.
 - **Custom Patterns**: Define sensitive data patterns using regex in the TOML config, each with a `block` or `redact` action.
 
 ### 3. Sensitive Email Isolation
@@ -38,7 +38,7 @@ ClawShell scans HTTP request and response bodies for sensitive data using config
 ClawShell supports sender-based email filtering so each virtual key only sees mailbox content based on sender rules.
 
 - **Sender Filtering**: Filter emails by sender.
-- **Key Isolation**: IMAP credentials are stored in `/etc/clawshell/clawshell.toml`, readable only by the `clawshell` system user. OpenClaw holds only virtual keys.
+- **Key Isolation**: IMAP credentials are stored in `/etc/clawshell/clawshell.toml`, readable only by the `clawshell` system user. OpenClaw/Hermes Agent holds only virtual keys.
 - **Provider Support**: Built-in Gmail and Outlook presets, with manual IMAP setup for other providers.
 
 ### 4. OAuth Authentication (Codex / ChatGPT)
@@ -75,8 +75,8 @@ ClawShell supports OAuth-based authentication as an alternative to static API ke
                                ║  ┌──────────┴────────────────┐
   ┌──────────────┐  REQUEST    ║  │                           │   REQUEST       ┌────────────┐
   │              ├──(virtual───╫─►│       ClawShell           ├──-(real key,───►│            │
-  │   OpenClaw   │   key)      ║  │                           │   PII redacted) │  OpenAI /  │
-  │              │             ║  │  DLP scan                 │                 │ Anthropic/ │
+  │  OpenClaw or │   key)      ║  │                           │   PII redacted) │  OpenAI /  │
+  │ Hermes Agent │             ║  │  DLP scan                 │                 │ Anthropic/ │
   │ holds only   │  RESPONSE   ║  │  real-key mapping         │   RESPONSE      │ OpenRouter │
   │ virtual keys │◄────────────║◄─┤  email sender filtering   │◄────────────────┤            │
   │              │             ║  │                           │                 └────────────┘
@@ -91,7 +91,7 @@ ClawShell supports OAuth-based authentication as an alternative to static API ke
                                ║  └───────────────────────────┘
 ```
 
-OpenClaw only holds virtual keys and cannot access the real API keys stored in the privileged config.
+OpenClaw/Hermes Agent only holds virtual keys and cannot access the real API keys stored in the privileged config.
 
 ClawShell swaps virtual keys for real ones and scans for PII before forwarding requests upstream.
 
