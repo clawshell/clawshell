@@ -33,5 +33,6 @@ pub use openclaw_json::{patch_openclaw_config_for_clawshell, remove_clawshell_op
 pub use skills::{render_admin_stats_skill, render_email_messages_skill};
 pub use types::{
     ADMIN_STATS_SKILL_NAME, EMAIL_MESSAGES_SKILL_NAME, OnboardAuthMethod, OnboardConfig,
-    OnboardSkillBundle, OnboardTarget, OpenclawFileRemovalPreview,
+    OnboardSkillBundle, OnboardTarget, OpenclawFileRemovalPreview, STATS_CRON_JOB_NAME,
+    STATS_CRON_PROMPT,
 };

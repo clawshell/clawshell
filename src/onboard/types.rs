@@ -121,6 +121,16 @@ pub struct OnboardSkillBundle {
 pub const EMAIL_MESSAGES_SKILL_NAME: &str = "get-email-messages";
 pub const ADMIN_STATS_SKILL_NAME: &str = "get-clawshell-stats";
 
+pub const STATS_CRON_JOB_NAME: &str = "clawshell-weekly-stats";
+
+pub const STATS_CRON_PROMPT: &str = "\
+Use the get-clawshell-stats skill to fetch ClawShell runtime statistics \
+from the /admin/stats endpoint, then present a short summary: total \
+requests served, token usage (prompt, completion, total), and \
+email-filter activity (total filtered count plus the top filtered \
+senders). If the endpoint returns an error or is unreachable, report \
+that instead.";
+
 /// Sender filtering mode for the Email endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnboardEmailMode {

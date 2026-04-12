@@ -645,6 +645,33 @@ fn nested_value_or_empty_object(json: &Value, path: &[&str]) -> Value {
     current.clone()
 }
 
+use crate::onboard::{STATS_CRON_JOB_NAME, STATS_CRON_PROMPT};
+
+pub fn setup_openclaw_stats_cron<R: OpenclawRunner>(runner: &mut R) -> Result<(), Box<dyn Error>> {
+    run_openclaw_command(
+        runner,
+        &[
+            "cron",
+            "add",
+            "--name",
+            STATS_CRON_JOB_NAME,
+            "--cron",
+            "0 9 * * 1",
+            "--session",
+            "isolated",
+            "--message",
+            STATS_CRON_PROMPT,
+            "--no-deliver",
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn remove_openclaw_stats_cron<R: OpenclawRunner>(runner: &mut R) -> Result<(), Box<dyn Error>> {
+    run_openclaw_command(runner, &["cron", "remove", STATS_CRON_JOB_NAME])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1179,5 +1206,40 @@ mod tests {
 
         assert!(error.contains("failed to resolve non-root target account metadata"));
         assert!(error.contains("uid 1000"));
+    }
+
+    #[test]
+    fn test_setup_openclaw_stats_cron_sends_correct_args() {
+        let mut runner = FakeOpenclawRunner {
+            responses: VecDeque::from([ok_output("")]),
+            ..Default::default()
+        };
+        setup_openclaw_stats_cron(&mut runner).unwrap();
+        assert_eq!(runner.calls.len(), 1);
+        let args = &runner.calls[0];
+        assert_eq!(args[0], "cron");
+        assert_eq!(args[1], "add");
+        assert!(args.contains(&"--name".to_string()));
+        assert!(args.contains(&STATS_CRON_JOB_NAME.to_string()));
+        assert!(args.contains(&"--cron".to_string()));
+        assert!(args.contains(&"0 9 * * 1".to_string()));
+        assert!(args.contains(&"--session".to_string()));
+        assert!(args.contains(&"isolated".to_string()));
+        assert!(args.contains(&"--no-deliver".to_string()));
+        let message_idx = args.iter().position(|a| a == "--message").unwrap();
+        let message = &args[message_idx + 1];
+        assert!(message.contains("get-clawshell-stats"));
+        assert!(message.contains("/admin/stats"));
+    }
+
+    #[test]
+    fn test_remove_openclaw_stats_cron_sends_correct_args() {
+        let mut runner = FakeOpenclawRunner {
+            responses: VecDeque::from([ok_output("")]),
+            ..Default::default()
+        };
+        remove_openclaw_stats_cron(&mut runner).unwrap();
+        assert_eq!(runner.calls.len(), 1);
+        assert_eq!(runner.calls[0], vec!["cron", "remove", STATS_CRON_JOB_NAME]);
     }
 }

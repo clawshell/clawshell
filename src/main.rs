@@ -1168,6 +1168,14 @@ fn apply_openclaw_onboarding_steps(
             onboard::upsert_managed_skill_manifest_entry(config_file, &skill.manifest_entry)?;
             tui::print_info("OpenClaw skill", &skill.path.display().to_string());
         }
+        // Set up the weekly stats cron job.
+        let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
+        match openclaw_cli::setup_openclaw_stats_cron(&mut openclaw_runner) {
+            Ok(()) => tui::print_info("Cron job", "clawshell-weekly-stats (Mon 09:00)"),
+            Err(err) => {
+                tui::print_warning(&format!("Failed to set up weekly stats cron job: {err}"))
+            }
+        }
         tui::print_step_done(6, TOTAL_STEPS, "OpenClaw skills written");
         written
     } else {
@@ -1325,6 +1333,14 @@ fn apply_hermes_onboarding_steps(
         Ok(paths) => {
             for path in &paths {
                 tui::print_info("Hermes skill", &path.display().to_string());
+            }
+            // Set up the weekly stats cron job.
+            let mut hermes_runner = hermes_cli::RealHermesRunner;
+            match hermes_cli::setup_hermes_stats_cron(&mut hermes_runner) {
+                Ok(()) => tui::print_info("Cron job", "clawshell-weekly-stats (Mon 09:00)"),
+                Err(err) => {
+                    tui::print_warning(&format!("Failed to set up weekly stats cron job: {err}"))
+                }
             }
             tui::print_step_done(6, TOTAL_STEPS, "Hermes skills written");
         }
@@ -1880,6 +1896,14 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
             openclaw_cli::UninstallCleanupOutcome::Cleaned => {
                 tui::print_success("OpenClaw configuration cleaned up.");
             }
+        }
+    }
+
+    // 0a. Remove the stats cron job (best-effort).
+    if openclaw_path.as_ref().is_some_and(|p| p.exists()) {
+        let mut runner = openclaw_cli::RealOpenclawRunner;
+        if let Err(err) = openclaw_cli::remove_openclaw_stats_cron(&mut runner) {
+            warn!(error = %err, "Failed to remove stats cron job during uninstall");
         }
     }
 

@@ -157,6 +157,54 @@ pub fn apply_onboard_hermes_config<R: HermesRunner>(
     Ok(())
 }
 
+use crate::onboard::{STATS_CRON_JOB_NAME, STATS_CRON_PROMPT};
+
+pub fn setup_hermes_stats_cron<R: HermesRunner>(runner: &mut R) -> Result<(), Box<dyn Error>> {
+    let output = runner
+        .run(&[
+            "cron".into(),
+            "create".into(),
+            "0 9 * * 1".into(),
+            STATS_CRON_PROMPT.into(),
+            "--skill".into(),
+            "get-clawshell-stats".into(),
+            "--name".into(),
+            STATS_CRON_JOB_NAME.into(),
+        ])
+        .map_err(|e| format!("failed to run `hermes cron create`: {e}"))?;
+    if !output.success {
+        let status = output
+            .status_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        return Err(format!(
+            "`hermes cron create` exited with status {status}: {}",
+            output.stderr.trim()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn remove_hermes_stats_cron<R: HermesRunner>(runner: &mut R) -> Result<(), Box<dyn Error>> {
+    let output = runner
+        .run(&["cron".into(), "remove".into(), STATS_CRON_JOB_NAME.into()])
+        .map_err(|e| format!("failed to run `hermes cron remove`: {e}"))?;
+    if !output.success {
+        let status = output
+            .status_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        return Err(format!(
+            "`hermes cron remove` exited with status {status}: {}",
+            output.stderr.trim()
+        )
+        .into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +310,30 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("failed to run"), "msg: {msg}");
         assert!(msg.contains("no such binary"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_setup_hermes_stats_cron_sends_correct_args() {
+        let mut runner = FakeHermesRunner::default();
+        setup_hermes_stats_cron(&mut runner).unwrap();
+        assert_eq!(runner.calls.len(), 1);
+        let args = &runner.calls[0];
+        assert_eq!(args[0], "cron");
+        assert_eq!(args[1], "create");
+        assert_eq!(args[2], "0 9 * * 1");
+        assert!(args[3].contains("get-clawshell-stats"));
+        assert!(args[3].contains("/admin/stats"));
+        assert!(args.contains(&"--skill".to_string()));
+        assert!(args.contains(&"get-clawshell-stats".to_string()));
+        assert!(args.contains(&"--name".to_string()));
+        assert!(args.contains(&STATS_CRON_JOB_NAME.to_string()));
+    }
+
+    #[test]
+    fn test_remove_hermes_stats_cron_sends_correct_args() {
+        let mut runner = FakeHermesRunner::default();
+        remove_hermes_stats_cron(&mut runner).unwrap();
+        assert_eq!(runner.calls.len(), 1);
+        assert_eq!(runner.calls[0], vec!["cron", "remove", STATS_CRON_JOB_NAME]);
     }
 }
