@@ -1,9 +1,9 @@
 [package]
 name = "clawshell"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 license-file = "LICENSE"
-homepage = "https://github.com/clawshell/clawshell"
+homepage = "https://clawshell.org/"
 repository = "https://github.com/clawshell/clawshell"
 exclude = ["npm/*", "docs/*"]
 description = "A security privileged process for the OpenClaw ecosystem."
