@@ -206,7 +206,7 @@ curl -sS "{base_url}/admin/stats"
 
 After the request succeeds, present a short human-readable summary:
 
-1. Total requests served and total tokens (prompt + completion + combined).
+1. Total requests protected and total tokens (prompt + completion + combined).
 2. Email-filter activity: the total filtered count, plus the top 5 addresses
    by per-address count.
 3. If the `filtered_email_addresses` map contains the synthetic key
@@ -237,7 +237,7 @@ curl -sS "{base_url}/admin/stats"
 
 ## Full response schema
 
-- `requests_total` (u64): every request that reached the axum router,
+- `requests_total` (u64): every request protected by ClawShell,
   regardless of status code. Includes both the proxy catch-all and the
   `/v1/email/*` routes (and this `/admin/stats` route itself).
 - `prompt_tokens_total` (u64): sum of upstream `prompt_tokens` /

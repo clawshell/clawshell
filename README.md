@@ -53,7 +53,7 @@ ClawShell supports OAuth-based authentication as an alternative to static API ke
 
 ClawShell exposes running counters at `GET /admin/stats` so operators can audit proxy activity since startup and across restarts.
 
-- **What's Counted**: Total requests served, total upstream `prompt_tokens` / `completion_tokens` / `total_tokens` (parsed from non-streaming JSON responses — SSE streams are not counted), number of emails hidden by the sender policy, and a per-address breakdown of filtered senders.
+- **What's Counted**: Total requests protected, total upstream `prompt_tokens` / `completion_tokens` / `total_tokens` (parsed from non-streaming JSON responses — SSE streams are not counted), number of emails hidden by the sender policy, and a per-address breakdown of filtered senders.
 - **Loopback-Only**: The endpoint is reachable without a virtual key but only from `127.0.0.1` / `::1` peers; non-loopback clients receive `403`.
 - **Persistent**: Counters are flushed to disk every 30 seconds and on graceful shutdown. The location is a required config field — set `[stats] persist_path = "..."` in `clawshell.toml` (typically `/var/lib/clawshell/stats.json` under the hardened systemd unit, since `/etc/clawshell` is read-only there).
 - **Bounded**: The filtered-address map is capped at 10,000 unique entries; further unique addresses are aggregated under an `<overflow>` bucket so memory stays bounded.

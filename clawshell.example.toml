@@ -54,7 +54,7 @@ patterns = [
 ]
 
 # Runtime statistics persistence
-# ClawShell counts total requests served, upstream prompt/completion/total
+# ClawShell counts total requests protected, upstream prompt/completion/total
 # tokens (from non-streaming responses), and per-sender email-filter
 # activity, and exposes them at GET /admin/stats (loopback-only).
 [stats]

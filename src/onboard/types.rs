@@ -126,7 +126,7 @@ pub const STATS_CRON_JOB_NAME: &str = "clawshell-weekly-stats";
 pub const STATS_CRON_PROMPT: &str = "\
 Use the get-clawshell-stats skill to fetch ClawShell runtime statistics \
 from the /admin/stats endpoint, then present a short summary: total \
-requests served, token usage (prompt, completion, total), and \
+requests protected, token usage (prompt, completion, total), and \
 email-filter activity (total filtered count plus the top filtered \
 senders). If the endpoint returns an error or is unreachable, report \
 that instead.";
