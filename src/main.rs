@@ -1830,6 +1830,30 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
             Vec::new()
         };
 
+    // Hermes skill directories (if the user's ~/.hermes/skills/ exists).
+    let hermes_home_dir: Option<PathBuf> =
+        resolve_hermes_target_user().ok().map(|(home, _, _)| home);
+    let hermes_skill_dirs: Vec<(&'static str, PathBuf)> = hermes_home_dir
+        .as_ref()
+        .map(|home| {
+            let skills_root = home.join(".hermes").join("skills");
+            [
+                onboard::ADMIN_STATS_SKILL_NAME,
+                onboard::EMAIL_MESSAGES_SKILL_NAME,
+            ]
+            .into_iter()
+            .filter_map(|name| {
+                let dir = skills_root.join(name);
+                if dir.exists() {
+                    Some((name, dir))
+                } else {
+                    None
+                }
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+
     tui::print_warning("This will remove the following:");
     tui::print_info("ClawShell", "Stop if running");
     tui::print_info("Config dir", &config_dir.display().to_string());
@@ -1870,6 +1894,9 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
             }
             onboard::ManagedSkillUninstallState::Missing => {}
         }
+    }
+    for (name, dir) in &hermes_skill_dirs {
+        tui::print_info("Hermes skill", &format!("{} ({})", dir.display(), name));
     }
     tui::print_info("Binary", &format!("{} (preserved)", exe_path.display()));
     tui::print_info("System user", "clawshell");
@@ -2000,6 +2027,43 @@ fn cmd_uninstall(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             onboard::ManagedSkillUninstallState::Missing => {}
+        }
+    }
+
+    // 0c. Remove ClawShell-managed Hermes skills if present.
+    for (name, dir) in &hermes_skill_dirs {
+        let remove = if skip_confirm {
+            true
+        } else {
+            tui::prompt_confirm(
+                &format!("Remove Hermes skill '{}' at {}?", name, dir.display()),
+                true,
+            )?
+        };
+        if remove {
+            match std::fs::remove_dir_all(dir) {
+                Ok(()) => tui::print_success(&format!("Hermes skill removed: {}", dir.display())),
+                Err(e) => tui::print_warning(&format!(
+                    "Failed to remove Hermes skill at {}: {e}",
+                    dir.display()
+                )),
+            }
+        }
+    }
+
+    // 0d. Remove the Hermes stats cron job (best-effort). We read
+    // ~/.hermes/cron/jobs.json to resolve the job ID by name, since
+    // `hermes cron remove` requires an ID, not a name.
+    if let Some(home) = hermes_home_dir.as_ref() {
+        let mut runner = hermes_cli::RealHermesRunner;
+        match hermes_cli::remove_hermes_stats_cron(&mut runner, home) {
+            Ok(n) if n > 0 => {
+                tui::print_success(&format!("Hermes stats cron job removed ({n} job(s))."))
+            }
+            Ok(_) => tui::print_info("Hermes cron", "no clawshell-weekly-stats job found"),
+            Err(err) => {
+                tui::print_warning(&format!("Failed to remove Hermes stats cron job: {err}"))
+            }
         }
     }
 

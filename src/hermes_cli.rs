@@ -216,23 +216,63 @@ pub fn setup_hermes_stats_cron<R: HermesRunner>(
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn remove_hermes_stats_cron<R: HermesRunner>(runner: &mut R) -> Result<(), Box<dyn Error>> {
-    let output = runner
-        .run(&["cron".into(), "remove".into(), STATS_CRON_JOB_NAME.into()])
-        .map_err(|e| format!("failed to run `hermes cron remove`: {e}"))?;
-    if !output.success {
-        let status = output
-            .status_code
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        return Err(format!(
-            "`hermes cron remove` exited with status {status}: {}",
-            output.stderr.trim()
-        )
-        .into());
+/// Remove the ClawShell stats cron job by reading `~/.hermes/cron/jobs.json`,
+/// finding job(s) whose `"name"` matches [`STATS_CRON_JOB_NAME`], and calling
+/// `hermes cron remove <id>` for each. Returns the number of jobs removed.
+/// `hermes cron remove` takes a job ID, not a name, so we must resolve the
+/// ID from the jobs file first.
+pub fn remove_hermes_stats_cron<R: HermesRunner>(
+    runner: &mut R,
+    home_dir: &Path,
+) -> Result<usize, Box<dyn Error>> {
+    let jobs_path = home_dir.join(".hermes").join("cron").join("jobs.json");
+    let content = match std::fs::read_to_string(&jobs_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(format!("failed to read {}: {e}", jobs_path.display()).into()),
+    };
+    // jobs.json is either a bare array or an object with a "jobs" key.
+    let parsed: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("failed to parse {}: {e}", jobs_path.display()))?;
+    let jobs = match &parsed {
+        serde_json::Value::Array(arr) => arr.as_slice(),
+        serde_json::Value::Object(obj) => obj
+            .get("jobs")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        _ => &[],
+    };
+
+    let matching_ids: Vec<String> = jobs
+        .iter()
+        .filter(|j| j.get("name").and_then(serde_json::Value::as_str) == Some(STATS_CRON_JOB_NAME))
+        .filter_map(|j| {
+            j.get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from)
+        })
+        .collect();
+
+    let mut removed = 0;
+    for id in &matching_ids {
+        let output = runner
+            .run(&["cron".into(), "remove".into(), id.clone()])
+            .map_err(|e| format!("failed to run `hermes cron remove {id}`: {e}"))?;
+        if !output.success {
+            let status = output
+                .status_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            return Err(format!(
+                "`hermes cron remove {id}` exited with status {status}: {}",
+                output.stderr.trim()
+            )
+            .into());
+        }
+        removed += 1;
     }
-    Ok(())
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -396,10 +436,48 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_hermes_stats_cron_sends_correct_args() {
+    fn test_remove_hermes_stats_cron_resolves_id_from_jobs_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let cron_dir = dir.path().join(".hermes").join("cron");
+        std::fs::create_dir_all(&cron_dir).unwrap();
+        let jobs = serde_json::json!({
+            "jobs": [
+                {"id": "abc123", "name": STATS_CRON_JOB_NAME, "schedule": "0 9 * * 1"},
+                {"id": "other1", "name": "unrelated-job", "schedule": "0 12 * * *"}
+            ],
+            "updated_at": "2026-01-01T00:00:00Z"
+        });
+        std::fs::write(cron_dir.join("jobs.json"), jobs.to_string()).unwrap();
+
         let mut runner = FakeHermesRunner::default();
-        remove_hermes_stats_cron(&mut runner).unwrap();
+        let removed = remove_hermes_stats_cron(&mut runner, dir.path()).unwrap();
+        assert_eq!(removed, 1);
         assert_eq!(runner.calls.len(), 1);
-        assert_eq!(runner.calls[0], vec!["cron", "remove", STATS_CRON_JOB_NAME]);
+        assert_eq!(runner.calls[0], vec!["cron", "remove", "abc123"]);
+    }
+
+    #[test]
+    fn test_remove_hermes_stats_cron_no_matching_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let cron_dir = dir.path().join(".hermes").join("cron");
+        std::fs::create_dir_all(&cron_dir).unwrap();
+        std::fs::write(
+            cron_dir.join("jobs.json"),
+            r#"{"jobs": [{"id": "xyz", "name": "other-job"}]}"#,
+        )
+        .unwrap();
+
+        let mut runner = FakeHermesRunner::default();
+        let removed = remove_hermes_stats_cron(&mut runner, dir.path()).unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(runner.calls.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_hermes_stats_cron_missing_jobs_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runner = FakeHermesRunner::default();
+        let removed = remove_hermes_stats_cron(&mut runner, dir.path()).unwrap();
+        assert_eq!(removed, 0);
     }
 }
