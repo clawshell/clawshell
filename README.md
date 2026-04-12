@@ -129,7 +129,7 @@ sudo clawshell onboard
 ### Build from Source
 
 ```bash
-cargo build --release
+RUSTFLAGS="--remap-path-prefix=$(pwd)=. --remap-path-prefix=$HOME=/" cargo build --release
 ls -al target/release/clawshell
 ```
 
@@ -139,6 +139,7 @@ ls -al target/release/clawshell
 wget https://musl.cc/x86_64-linux-musl-cross.tgz -O /tmp/musl-cross.tgz
 tar -xzf /tmp/musl-cross.tgz -C /tmp
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="/tmp/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc" \
+RUSTFLAGS="--remap-path-prefix=$(pwd)=. --remap-path-prefix=$HOME=/" \
 cargo build --release --target x86_64-unknown-linux-musl
 ```
 
