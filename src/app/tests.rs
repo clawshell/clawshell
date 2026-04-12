@@ -1971,3 +1971,58 @@ async fn test_email_message_content_endpoint_disabled_returns_not_found() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// ========== ensure_stream_options Tests ==========
+
+#[test]
+fn test_ensure_stream_options_injects_for_openai() {
+    use crate::config::Provider;
+    let body = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true
+    });
+    let result = super::ensure_stream_options(body.to_string().as_bytes(), Provider::Openai);
+    assert!(result.is_some());
+    let parsed: serde_json::Value = serde_json::from_slice(&result.unwrap()).unwrap();
+    assert_eq!(
+        parsed["stream_options"]["include_usage"],
+        serde_json::json!(true)
+    );
+}
+
+#[test]
+fn test_ensure_stream_options_injects_for_openrouter() {
+    use crate::config::Provider;
+    let body = serde_json::json!({"stream": true, "messages": []});
+    let result = super::ensure_stream_options(body.to_string().as_bytes(), Provider::Openrouter);
+    assert!(result.is_some());
+}
+
+#[test]
+fn test_ensure_stream_options_skips_non_streaming() {
+    use crate::config::Provider;
+    let body = serde_json::json!({"model": "gpt-4o", "messages": []});
+    let result = super::ensure_stream_options(body.to_string().as_bytes(), Provider::Openai);
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_ensure_stream_options_skips_anthropic() {
+    use crate::config::Provider;
+    let body = serde_json::json!({"stream": true, "messages": []});
+    let result = super::ensure_stream_options(body.to_string().as_bytes(), Provider::Anthropic);
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_ensure_stream_options_preserves_existing() {
+    use crate::config::Provider;
+    let body = serde_json::json!({
+        "stream": true,
+        "stream_options": {"include_usage": true},
+        "messages": []
+    });
+    let result = super::ensure_stream_options(body.to_string().as_bytes(), Provider::Openai);
+    assert!(result.is_none());
+}

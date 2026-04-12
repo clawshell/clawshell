@@ -616,6 +616,24 @@ async fn handle_request(
         body_bytes
     };
 
+    // 3b. Try injecting stream_options so the provider returns token usage
+    // in SSE chunks. If the upstream rejects it (400 "unknown_parameter"),
+    // we retry without it in step 4b.
+    let (body_bytes, original_body) = match ensure_stream_options(&body_bytes, provider) {
+        Some(patched) => (Bytes::from(patched), Some(body_bytes)),
+        None => (body_bytes, None),
+    };
+    let retry_headers = if original_body.is_some() {
+        Some(headers.clone())
+    } else {
+        None
+    };
+    let retry_source = if original_body.is_some() {
+        Some(source.clone())
+    } else {
+        None
+    };
+
     // 4. Forward to upstream
     info!(
         method = %method,
@@ -669,6 +687,65 @@ async fn handle_request(
         })?,
     };
 
+    // 4b. If we injected stream_options and the upstream returned 400 with
+    // "unknown_parameter", the model doesn't support it — retry without.
+    let response = if let (Some(original_body), Some(retry_headers), Some(retry_source)) =
+        (original_body, retry_headers, retry_source)
+    {
+        if response.status() == StatusCode::BAD_REQUEST {
+            let (parts, err_body) = response.into_parts();
+            let err_bytes = err_body
+                .collect()
+                .await
+                .map(|b| b.to_bytes())
+                .unwrap_or_default();
+            if String::from_utf8_lossy(&err_bytes).contains("unknown_parameter") {
+                debug!(
+                    method = %method,
+                    path = %path,
+                    "Upstream rejected stream_options; retrying without it"
+                );
+                match retry_source {
+                    KeySource::Static { real_key } => state
+                        .proxy_client
+                        .forward(
+                            method.clone(),
+                            &uri,
+                            retry_headers,
+                            &real_key,
+                            original_body,
+                            provider,
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!(error = %e, "Proxy error on stream_options retry");
+                            e.into_response()
+                        })?,
+                    KeySource::OAuth { provider_id } => forward_oauth_request(
+                        &state,
+                        method.clone(),
+                        &uri,
+                        retry_headers,
+                        original_body,
+                        provider,
+                        &provider_id,
+                    )
+                    .await
+                    .map_err(|e| {
+                        error!(error = %e, "OAuth proxy error on stream_options retry");
+                        error_response(StatusCode::BAD_GATEWAY, &format!("OAuth proxy error: {e}"))
+                    })?,
+                }
+            } else {
+                Response::from_parts(parts, Body::from(err_bytes))
+            }
+        } else {
+            response
+        }
+    } else {
+        response
+    };
+
     // 5. Response processing.
     // Non-streaming responses are buffered so we can (a) record upstream
     // token usage for stats and (b) optionally DLP-redact before sending.
@@ -681,21 +758,18 @@ async fn handle_request(
         .is_some_and(|ct| ct.contains("text/event-stream"));
 
     let response = if is_streaming {
-        if state.dlp_scanner.scan_responses() {
-            debug!(
-                method = %method,
-                path = %path,
-                virtual_key = %virtual_key,
-                "Streaming response (SSE) — wrapping with DLP SSE scanner"
-            );
-            let (parts, body) = response.into_parts();
-            let dlp_body =
-                crate::translate::wrap_body_with_dlp_sse_stream(body, state.dlp_scanner.clone());
-            Response::from_parts(parts, dlp_body)
-        } else {
-            trace!("Streaming response, DLP response scanning disabled");
-            response
-        }
+        trace!(
+            method = %method,
+            path = %path,
+            "Streaming response (SSE) — wrapping for DLP + token counting"
+        );
+        let (parts, body) = response.into_parts();
+        let dlp_body = crate::translate::wrap_body_with_dlp_sse_stream(
+            body,
+            state.dlp_scanner.clone(),
+            state.stats.clone(),
+        );
+        Response::from_parts(parts, dlp_body)
     } else {
         let (parts, body) = response.into_parts();
         let body_bytes = body
@@ -1007,6 +1081,31 @@ fn build_rewritten_uri(original: &Uri, new_path: &str) -> Result<Uri, String> {
     path_and_query
         .parse::<Uri>()
         .map_err(|e| format!("failed to build rewritten URI: {e}"))
+}
+
+fn ensure_stream_options(body: &[u8], provider: Provider) -> Option<Vec<u8>> {
+    if !matches!(provider, Provider::Openai | Provider::Openrouter) {
+        return None;
+    }
+    let mut json: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let obj = json.as_object_mut()?;
+    if obj.get("stream").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    let already_set = obj
+        .get("stream_options")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|so| so.get("include_usage"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if already_set {
+        return None;
+    }
+    obj.insert(
+        "stream_options".to_string(),
+        serde_json::json!({"include_usage": true}),
+    );
+    serde_json::to_vec(&json).ok()
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {

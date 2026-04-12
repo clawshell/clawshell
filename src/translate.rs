@@ -1,4 +1,5 @@
 use crate::dlp::DlpScanner;
+use crate::stats::Stats;
 use axum::body::Body;
 use bytes::{Bytes, BytesMut};
 use futures_util::Stream;
@@ -18,7 +19,14 @@ pub enum TranslateError {
 }
 
 /// Fields that are compatible between chat/completions and responses API.
-const PASSTHROUGH_FIELDS: &[&str] = &["model", "stream", "temperature", "top_p", "stop"];
+const PASSTHROUGH_FIELDS: &[&str] = &[
+    "model",
+    "stream",
+    "stream_options",
+    "temperature",
+    "top_p",
+    "stop",
+];
 
 /// Fields that must be stripped from chat/completions requests (not supported by responses API).
 const STRIP_FIELDS: &[&str] = &[
@@ -507,16 +515,18 @@ pub fn redact_sse_data_line(line: &str, scanner: &DlpScanner) -> String {
     )
 }
 
-/// Stream adapter that applies DLP redaction to SSE data lines.
+/// Stream adapter that applies DLP redaction to SSE data lines and
+/// extracts upstream token usage for stats.
 pub struct DlpSseStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, axum::Error>> + Send>>,
     buffer: BytesMut,
     scanner: Arc<DlpScanner>,
+    stats: Arc<Stats>,
     output_buffer: Vec<u8>,
 }
 
 impl DlpSseStream {
-    pub fn new(body: Body, scanner: Arc<DlpScanner>) -> Self {
+    pub fn new(body: Body, scanner: Arc<DlpScanner>, stats: Arc<Stats>) -> Self {
         use futures_util::StreamExt;
         use http_body_util::BodyStream;
 
@@ -531,6 +541,7 @@ impl DlpSseStream {
             inner: Box::pin(stream),
             buffer: BytesMut::new(),
             scanner,
+            stats,
             output_buffer: Vec::new(),
         }
     }
@@ -547,6 +558,16 @@ impl DlpSseStream {
             if line.is_empty() {
                 self.output_buffer.extend_from_slice(b"\n");
                 continue;
+            }
+
+            // Extract token usage from SSE data events. This is a no-op
+            // for the vast majority of events that don't carry a `usage`
+            // key; only the 1–3 events per stream that do will actually
+            // update the atomic counters.
+            if let Some(json_str) = line.strip_prefix("data: ") {
+                if !json_str.starts_with("[DONE]") {
+                    self.stats.record_tokens_from_usage(json_str.as_bytes());
+                }
             }
 
             let redacted = redact_sse_data_line(&line, &self.scanner);
@@ -578,6 +599,11 @@ impl Stream for DlpSseStream {
                         let remaining = std::mem::take(&mut this.buffer);
                         let line = String::from_utf8_lossy(&remaining).trim().to_string();
                         if !line.is_empty() {
+                            if let Some(json_str) = line.strip_prefix("data: ") {
+                                if !json_str.starts_with("[DONE]") {
+                                    this.stats.record_tokens_from_usage(json_str.as_bytes());
+                                }
+                            }
                             let redacted = redact_sse_data_line(&line, &this.scanner);
                             return Poll::Ready(Some(Ok(Bytes::from(format!("{redacted}\n")))));
                         }
@@ -590,9 +616,14 @@ impl Stream for DlpSseStream {
     }
 }
 
-/// Wrap a Body in a DlpSseStream for streaming DLP redaction.
-pub fn wrap_body_with_dlp_sse_stream(body: Body, scanner: Arc<DlpScanner>) -> Body {
-    Body::from_stream(DlpSseStream::new(body, scanner))
+/// Wrap a Body in a DlpSseStream for streaming DLP redaction and
+/// token usage extraction.
+pub fn wrap_body_with_dlp_sse_stream(
+    body: Body,
+    scanner: Arc<DlpScanner>,
+    stats: Arc<Stats>,
+) -> Body {
+    Body::from_stream(DlpSseStream::new(body, scanner, stats))
 }
 
 #[cfg(test)]
@@ -705,6 +736,7 @@ mod tests {
             "model": "gpt-4o-mini",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": true,
+            "stream_options": {"include_usage": true},
             "temperature": 0.7,
             "top_p": 0.9,
             "stop": ["\n"]
@@ -714,6 +746,10 @@ mod tests {
 
         assert_eq!(parsed["model"], "gpt-4o-mini");
         assert_eq!(parsed["stream"], true);
+        assert_eq!(
+            parsed["stream_options"],
+            serde_json::json!({"include_usage": true})
+        );
         assert_eq!(parsed["temperature"], 0.7);
         assert_eq!(parsed["top_p"], 0.9);
         assert_eq!(parsed["stop"], serde_json::json!(["\n"]));
@@ -991,5 +1027,77 @@ mod tests {
             result, "event: message",
             "Non-data lines pass through unchanged"
         );
+    }
+
+    #[test]
+    fn test_sse_stream_counts_openai_usage() {
+        let stats = Arc::new(Stats::new(None));
+        let scanner = Arc::new(DlpScanner::new(&[], false).unwrap());
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\
+                   data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\
+                   data: [DONE]\n";
+        let body = Body::from(sse);
+        let wrapped = wrap_body_with_dlp_sse_stream(body, scanner, stats.clone());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            use http_body_util::BodyExt;
+            wrapped.collect().await.unwrap();
+        });
+
+        let snap = stats.snapshot();
+        assert_eq!(snap.prompt_tokens_total, 10);
+        assert_eq!(snap.completion_tokens_total, 5);
+        assert_eq!(snap.total_tokens_total, 15);
+    }
+
+    #[test]
+    fn test_sse_stream_counts_anthropic_usage() {
+        let stats = Arc::new(Stats::new(None));
+        let scanner = Arc::new(DlpScanner::new(&[], false).unwrap());
+        let sse = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\
+                   data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hi\"}}\n\
+                   data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n";
+        let body = Body::from(sse);
+        let wrapped = wrap_body_with_dlp_sse_stream(body, scanner, stats.clone());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            use http_body_util::BodyExt;
+            wrapped.collect().await.unwrap();
+        });
+
+        let snap = stats.snapshot();
+        assert_eq!(snap.prompt_tokens_total, 7);
+        assert_eq!(snap.completion_tokens_total, 3);
+        assert_eq!(snap.total_tokens_total, 10);
+    }
+
+    #[test]
+    fn test_sse_stream_ignores_events_without_usage() {
+        let stats = Arc::new(Stats::new(None));
+        let scanner = Arc::new(DlpScanner::new(&[], false).unwrap());
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\
+                   data: [DONE]\n";
+        let body = Body::from(sse);
+        let wrapped = wrap_body_with_dlp_sse_stream(body, scanner, stats.clone());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            use http_body_util::BodyExt;
+            wrapped.collect().await.unwrap();
+        });
+
+        let snap = stats.snapshot();
+        assert_eq!(snap.prompt_tokens_total, 0);
+        assert_eq!(snap.completion_tokens_total, 0);
+        assert_eq!(snap.total_tokens_total, 0);
     }
 }

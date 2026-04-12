@@ -101,7 +101,12 @@ impl Stats {
         let Ok(json) = serde_json::from_slice::<Value>(body) else {
             return;
         };
-        let Some(usage) = json.get("usage") else {
+        // Top-level `usage` (OpenAI, Anthropic message_delta) or nested
+        // under `message.usage` (Anthropic message_start).
+        let usage = json
+            .get("usage")
+            .or_else(|| json.get("message").and_then(|m| m.get("usage")));
+        let Some(usage) = usage else {
             return;
         };
 
