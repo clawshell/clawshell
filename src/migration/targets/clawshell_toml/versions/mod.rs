@@ -1,4 +1,5 @@
 mod to_v0_1_0_alpha_0;
+mod to_v0_2_1;
 
 use crate::migration::core::{AmbiguityResolver, ConfigVersion};
 use crate::migration::target::TargetError;
@@ -30,6 +31,13 @@ pub fn apply_versioned_steps(
 
     if from < &v0_1_0_alpha_0 && to >= &v0_1_0_alpha_0 {
         let step_output = to_v0_1_0_alpha_0::apply(target_name, table, resolver)?;
+        output.merge(step_output);
+    }
+
+    let v0_2_1: ConfigVersion = "0.2.1".parse().expect("literal config version must parse");
+
+    if from < &v0_2_1 && to >= &v0_2_1 {
+        let step_output = to_v0_2_1::apply(target_name, table, resolver)?;
         output.merge(step_output);
     }
 
@@ -104,5 +112,59 @@ openai_base_url = "https://api.openai.com"
 
         assert!(output.applied_steps.is_empty());
         assert!(output.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_apply_versioned_steps_adds_stats_from_0_1_1() {
+        let mut table: toml::value::Table = toml::from_str(
+            r#"
+version = "0.1.1"
+
+[server]
+host = "127.0.0.1"
+[upstream]
+openai_base_url = "https://api.openai.com"
+"#,
+        )
+        .unwrap();
+
+        let from: ConfigVersion = "0.1.1".parse().unwrap();
+        let to: ConfigVersion = "0.2.1".parse().unwrap();
+
+        let mut resolver = NoopResolver;
+        let output = apply_versioned_steps("clawshell", &mut table, &from, &to, &mut resolver)
+            .expect("migration should succeed");
+
+        assert!(output.applied_steps.iter().any(|s| s.contains("[stats]")));
+        let stats = table.get("stats").unwrap().as_table().unwrap();
+        assert_eq!(
+            stats.get("persist_path").unwrap().as_str().unwrap(),
+            "/etc/clawshell/stats.json"
+        );
+    }
+
+    #[test]
+    fn test_apply_versioned_steps_adds_stats_from_0_2_0() {
+        let mut table: toml::value::Table = toml::from_str(
+            r#"
+version = "0.2.0"
+
+[server]
+host = "127.0.0.1"
+[upstream]
+openai_base_url = "https://api.openai.com"
+"#,
+        )
+        .unwrap();
+
+        let from: ConfigVersion = "0.2.0".parse().unwrap();
+        let to: ConfigVersion = "0.2.1".parse().unwrap();
+
+        let mut resolver = NoopResolver;
+        let output = apply_versioned_steps("clawshell", &mut table, &from, &to, &mut resolver)
+            .expect("migration should succeed");
+
+        assert!(output.applied_steps.iter().any(|s| s.contains("[stats]")));
+        assert!(table.contains_key("stats"));
     }
 }
