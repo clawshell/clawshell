@@ -17,6 +17,7 @@ mod openclaw_cli;
 mod platform;
 mod process;
 mod proxy;
+mod stats;
 mod translate;
 mod tui;
 
@@ -676,27 +677,51 @@ async fn cmd_start_inner(config_path: &str) -> Result<(), Box<dyn std::error::Er
     let cancel = tokio_util::sync::CancellationToken::new();
     app_state.oauth_registry.spawn_refresh_tasks(cancel.clone());
 
+    // Periodically persist stats counters so they survive restarts.
+    let stats_for_task = app_state.stats.clone();
+    let stats_cancel = cancel.clone();
+    tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(30);
+        loop {
+            tokio::select! {
+                _ = stats_cancel.cancelled() => break,
+                _ = tokio::time::sleep(interval) => {
+                    if let Err(err) = stats_for_task.persist() {
+                        warn!(error = %err, "failed to persist stats");
+                    }
+                }
+            }
+        }
+    });
+
     let addr: SocketAddr = listen_addr.parse()?;
+    let stats_for_shutdown = app_state.stats.clone();
     let app = build_router(app_state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("Listening on {}", addr);
 
     process::drop_privileges()?;
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let ctrl_c = signal::ctrl_c();
-            #[cfg(unix)]
-            let mut term = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
-            #[cfg(unix)]
-            tokio::select! { _ = ctrl_c => {}, _ = term.recv() => {} };
-            #[cfg(not(unix))]
-            ctrl_c.await.ok();
-            info!("Shutdown signal received");
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let ctrl_c = signal::ctrl_c();
+        #[cfg(unix)]
+        let mut term = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
+        #[cfg(unix)]
+        tokio::select! { _ = ctrl_c => {}, _ = term.recv() => {} };
+        #[cfg(not(unix))]
+        ctrl_c.await.ok();
+        info!("Shutdown signal received");
+    })
+    .await?;
 
     cancel.cancel();
+    if let Err(err) = stats_for_shutdown.persist() {
+        warn!(error = %err, "failed to persist stats on shutdown");
+    }
     info!("ClawShell shut down");
     Ok(())
 }

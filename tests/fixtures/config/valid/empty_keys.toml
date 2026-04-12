@@ -5,3 +5,6 @@
 [[keys]]
 virtual_key = ""
 real_key = ""
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"

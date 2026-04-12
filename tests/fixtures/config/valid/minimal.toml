@@ -1,2 +1,5 @@
 [server]
 [upstream]
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"

@@ -1,5 +1,5 @@
 ---
-source: tests/config_fixtures.rs
+source: src/config.rs
 expression: snapshot
 ---
 server:
@@ -17,6 +17,8 @@ keys:
 dlp:
   patterns: []
   scan_responses: true
+stats:
+  persist_path: /etc/clawshell/stats.json
 log_level: info
 derived:
   listen_addr: "127.0.0.1:18790"

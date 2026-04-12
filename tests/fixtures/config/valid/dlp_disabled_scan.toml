@@ -3,3 +3,6 @@
 
 [dlp]
 scan_responses = false
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"

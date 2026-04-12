@@ -49,12 +49,21 @@ ClawShell supports OAuth-based authentication as an alternative to static API ke
 - **Automatic Token Refresh**: Access tokens are refreshed transparently before they expire.
 - **Request Translation**: Automatically translates OpenAI Chat Completions API requests to the ChatGPT Responses API format when using Codex OAuth.
 
-### 5. Seamless Integration
+### 5. Runtime Statistics
+
+ClawShell exposes running counters at `GET /admin/stats` so operators can audit proxy activity since startup and across restarts.
+
+- **What's Counted**: Total requests served, total upstream `prompt_tokens` / `completion_tokens` / `total_tokens` (parsed from non-streaming JSON responses — SSE streams are not counted), number of emails hidden by the sender policy, and a per-address breakdown of filtered senders.
+- **Loopback-Only**: The endpoint is reachable without a virtual key but only from `127.0.0.1` / `::1` peers; non-loopback clients receive `403`.
+- **Persistent**: Counters are flushed to disk every 30 seconds and on graceful shutdown. The location is a required config field — set `[stats] persist_path = "..."` in `clawshell.toml` (typically `/var/lib/clawshell/stats.json` under the hardened systemd unit, since `/etc/clawshell` is read-only there).
+- **Bounded**: The filtered-address map is capped at 10,000 unique entries; further unique addresses are aggregated under an `<overflow>` bucket so memory stays bounded.
+
+### 6. Seamless Integration
 
 - **Drop-in Sidecar**: The `clawshell onboard` wizard configures exactly one downstream LLM client per run — either OpenClaw or [Hermes Agent](https://github.com/NousResearch/hermes-agent) — to route all requests through ClawShell's proxy. See [Agent Target (pick one)](#agent-target-pick-one).
 - **No External Dependencies**: Uses Unix file system permissions to protect secrets. No IdP, Vault, or external key management service required.
 
-### 6. Ultra Lightweight and Scalable
+### 7. Ultra Lightweight and Scalable
 
 - Runs in under 10MB of memory.
 - Written in Rust with Tokio.

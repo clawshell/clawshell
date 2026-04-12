@@ -5,3 +5,6 @@
 patterns = [
     { name = "bad", regex = '[invalid' },
 ]
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
