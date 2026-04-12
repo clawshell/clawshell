@@ -8,10 +8,11 @@ use crate::email::{
 use crate::keys::{KeyManager, KeySource, ResolvedKey};
 use crate::oauth::OAuthRegistry;
 use crate::proxy::ProxyClient;
+use crate::stats::Stats;
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -20,6 +21,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, info, trace, warn};
@@ -34,6 +36,7 @@ pub struct AppState {
     pub email_policy: Option<EmailPolicy>,
     pub email_accounts: Arc<BTreeMap<String, EmailAccountCredentials>>,
     pub email_service: Arc<EmailService>,
+    pub stats: Arc<Stats>,
 }
 
 impl AppState {
@@ -138,6 +141,7 @@ impl AppState {
             email_policy,
             email_accounts: Arc::new(email_accounts),
             email_service: Arc::new(EmailService::Imap(ImapEmailService::default())),
+            stats: Arc::new(Stats::new(Some(config.stats.persist_path.clone()))),
         })
     }
 }
@@ -149,19 +153,29 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/email/messages", get(handle_email_secure_messages))
         .route("/v1/email/messages/{id}", get(handle_email_message_content))
+        .route("/admin/stats", get(handle_stats))
         .route("/", any(handle_request))
         .route("/{*path}", any(handle_request))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
-        .layer(axum::middleware::from_fn(log_request_completion))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            log_request_completion,
+        ))
         .with_state(state)
 }
 
-async fn log_request_completion(request: Request, next: Next) -> Response {
+async fn log_request_completion(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
     let start = Instant::now();
     let method = request.method().clone();
     let path = request.uri().path().to_string();
     let query = request.uri().query().map(|q| q.to_string());
     let response = next.run(request).await;
+
+    state.stats.record_request();
 
     info!(
         method = %method,
@@ -317,6 +331,7 @@ async fn handle_email_secure_messages(
             continue;
         };
         if !policy.sender_visible(from_header) {
+            state.stats.record_email_filtered(from_header);
             continue;
         }
         visible_messages.push(EmailSecureMessage {
@@ -447,6 +462,9 @@ async fn handle_email_message_content(
         .as_deref()
         .or_else(|| content.headers.get("from").map(String::as_str));
     if from_header.is_none_or(|from| !policy.sender_visible(from)) {
+        if let Some(from) = from_header {
+            state.stats.record_email_filtered(from);
+        }
         return Err(error_response(
             StatusCode::NOT_FOUND,
             "Email message not found",
@@ -467,6 +485,27 @@ async fn handle_email_message_content(
     };
 
     Ok(axum::Json(response).into_response())
+}
+
+/// Management endpoint that returns running counters for total requests,
+/// upstream token usage, and per-sender email-filter activity. Only
+/// reachable from loopback peers; streaming (SSE) responses are not
+/// included in token totals (see `handle_request`).
+async fn handle_stats(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> Result<Response, Response> {
+    if !peer.ip().is_loopback() {
+        warn!(
+            peer = %peer,
+            "Non-loopback client tried to hit /admin/stats"
+        );
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "stats endpoint is loopback-only",
+        ));
+    }
+    Ok(axum::Json(state.stats.snapshot()).into_response())
 }
 
 async fn handle_request(
@@ -630,31 +669,52 @@ async fn handle_request(
         })?,
     };
 
-    // 5. DLP scan on response body (redact all PII before returning to client)
-    let response = if state.dlp_scanner.scan_responses() {
-        trace!("Response DLP scanning enabled, checking response body");
-        let is_streaming = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.contains("text/event-stream"));
+    // 5. Response processing.
+    // Non-streaming responses are buffered so we can (a) record upstream
+    // token usage for stats and (b) optionally DLP-redact before sending.
+    // SSE streams are handled by the existing DLP SSE wrapper; we do not
+    // count tokens from SSE usage events.
+    let is_streaming = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream"));
 
-        if !is_streaming {
-            trace!("Non-streaming response, scanning body for PII");
+    let response = if is_streaming {
+        if state.dlp_scanner.scan_responses() {
+            debug!(
+                method = %method,
+                path = %path,
+                virtual_key = %virtual_key,
+                "Streaming response (SSE) — wrapping with DLP SSE scanner"
+            );
             let (parts, body) = response.into_parts();
-            let body = body
-                .collect()
-                .await
-                .map_err(|e| {
-                    error!(error = %e, "Failed to read response body for DLP scan");
-                    error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Failed to process response",
-                    )
-                })?
-                .to_bytes();
+            let dlp_body =
+                crate::translate::wrap_body_with_dlp_sse_stream(body, state.dlp_scanner.clone());
+            Response::from_parts(parts, dlp_body)
+        } else {
+            trace!("Streaming response, DLP response scanning disabled");
+            response
+        }
+    } else {
+        let (parts, body) = response.into_parts();
+        let body_bytes = body
+            .collect()
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Failed to read response body");
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to process response",
+                )
+            })?
+            .to_bytes();
 
-            let (redacted, redacted_names) = state.dlp_scanner.redact_all(&body);
+        // Count tokens from the upstream `usage` block before any DLP mutation.
+        state.stats.record_tokens_from_usage(&body_bytes);
+
+        if state.dlp_scanner.scan_responses() {
+            let (redacted, redacted_names) = state.dlp_scanner.redact_all(&body_bytes);
             if !redacted_names.is_empty() {
                 warn!(
                     method = %method,
@@ -669,23 +729,11 @@ async fn handle_request(
                 parts.headers.remove("content-length");
                 Response::from_parts(parts, Body::from(redacted_bytes))
             } else {
-                Response::from_parts(parts, Body::from(body))
+                Response::from_parts(parts, Body::from(body_bytes))
             }
         } else {
-            debug!(
-                method = %method,
-                path = %path,
-                virtual_key = %virtual_key,
-                "Streaming response (SSE) — wrapping with DLP SSE scanner"
-            );
-            let (parts, body) = response.into_parts();
-            let dlp_body =
-                crate::translate::wrap_body_with_dlp_sse_stream(body, state.dlp_scanner.clone());
-            Response::from_parts(parts, dlp_body)
+            Response::from_parts(parts, Body::from(body_bytes))
         }
-    } else {
-        trace!("Response DLP scanning disabled");
-        response
     };
 
     Ok(response)

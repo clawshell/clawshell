@@ -19,6 +19,7 @@ use crate::email::{
 use crate::keys::{KeyManager, KeySource, ResolvedKey};
 use crate::oauth::OAuthRegistry;
 use crate::proxy::ProxyClient;
+use crate::stats::Stats;
 
 fn make_app(upstream_url: &str) -> axum::Router {
     let mut key_map = BTreeMap::new();
@@ -75,6 +76,7 @@ fn make_app(upstream_url: &str) -> axum::Router {
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
         email_service: Arc::new(EmailService::mock_disabled()),
+        stats: Arc::new(Stats::new(None)),
     };
 
     build_router(state)
@@ -117,6 +119,7 @@ fn make_app_with_anthropic(upstream_url: &str) -> axum::Router {
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
         email_service: Arc::new(EmailService::mock_disabled()),
+        stats: Arc::new(Stats::new(None)),
     };
 
     build_router(state)
@@ -568,6 +571,8 @@ openai_base_url = "https://api.openai.com"
 [[keys]]
 virtual_key = "vk-1"
 real_key = "sk-real-1"
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
     let config = Config::parse(toml_str).unwrap();
     let state = AppState::from_config(&config).unwrap();
@@ -597,6 +602,8 @@ provider = "openai"
 virtual_key = "vk-ant"
 real_key = "sk-ant-key"
 provider = "anthropic"
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
     let config = Config::parse(toml_str).unwrap();
     let state = AppState::from_config(&config).unwrap();
@@ -635,6 +642,9 @@ email = "bot@gmail.com"
 app_password = "abcd efgh ijkl mnop"
 imap_host = "imap.gmail.com"
 imap_port = 993
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
     let config = Config::parse(toml_str).unwrap();
     let state = AppState::from_config(&config).unwrap();
@@ -665,6 +675,9 @@ allow_senders = ["alice@example.com"]
 virtual_key = "vk-email"
 email = "bot@gmail.com"
 app_password = "abcd efgh ijkl mnop"
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
     let config = Config::parse(toml_str).unwrap();
     let state = AppState::from_config(&config).unwrap();
@@ -708,6 +721,7 @@ async fn test_proxy_error_on_unreachable_upstream() {
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
         email_service: Arc::new(EmailService::mock_disabled()),
+        stats: Arc::new(Stats::new(None)),
     };
 
     let app = build_router(state);
@@ -855,6 +869,7 @@ async fn test_anthropic_dlp_blocks_sensitive_data() {
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
         email_service: Arc::new(EmailService::mock_disabled()),
+        stats: Arc::new(Stats::new(None)),
     };
     let app = build_router(state);
 
@@ -957,6 +972,7 @@ async fn test_openai_and_openrouter_keys_map_to_distinct_real_keys() {
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
         email_service: Arc::new(EmailService::mock_disabled()),
+        stats: Arc::new(Stats::new(None)),
     });
 
     let openai_req = Request::builder()
@@ -1028,6 +1044,7 @@ fn make_app_with_redact(upstream_url: &str) -> axum::Router {
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
         email_service: Arc::new(EmailService::mock_disabled()),
+        stats: Arc::new(Stats::new(None)),
     };
 
     build_router(state)
@@ -1235,6 +1252,7 @@ async fn test_response_dlp_disabled() {
         email_policy: None,
         email_accounts: Arc::new(BTreeMap::new()),
         email_service: Arc::new(EmailService::mock_disabled()),
+        stats: Arc::new(Stats::new(None)),
     };
     let app = build_router(state);
 
@@ -1598,6 +1616,7 @@ fn make_email_app(
         email_policy: Some(policy),
         email_accounts: Arc::new(email_accounts),
         email_service,
+        stats: Arc::new(Stats::new(None)),
     };
 
     build_router(state)

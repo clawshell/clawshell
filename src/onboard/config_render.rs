@@ -76,6 +76,9 @@ patterns = [
     {{ name = "mastercard",      regex = '\b5[1-5][0-9]{{14}}\b',                                                  action = "redact" }},
     {{ name = "amex_card",       regex = '\b3[47][0-9]{{13}}\b',                                                   action = "redact" }},
 ]
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 {oauth_providers_section}"#,
         version = env!("CARGO_PKG_VERSION"),
         host = config.server_host,
@@ -152,6 +155,8 @@ mod tests {
         assert!(toml_str.contains("log_level = \"info\""));
         assert!(toml_str.contains(&format!("version = \"{}\"", env!("CARGO_PKG_VERSION"))));
         assert!(toml_str.contains("[dlp]"));
+        assert!(toml_str.contains("[stats]"));
+        assert!(toml_str.contains("persist_path ="));
         assert!(!toml_str.contains("[email]"));
         assert!(!toml_str.contains("[rate_limit]"));
     }

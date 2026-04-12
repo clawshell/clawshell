@@ -1,0 +1,9 @@
+---
+source: src/config.rs
+expression: err.to_string()
+---
+TOML parse error at line 1, column 1
+  |
+1 | [server]
+  | ^
+missing field `stats`

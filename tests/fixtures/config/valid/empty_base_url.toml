@@ -2,3 +2,6 @@
 
 [upstream]
 openai_base_url = ""
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"

@@ -2,7 +2,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env::VarError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
@@ -38,6 +38,7 @@ pub struct Config {
     pub dlp: DlpConfig,
     #[serde(default, skip_serializing_if = "EmailConfig::is_default")]
     pub email: EmailConfig,
+    pub stats: StatsConfig,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -148,6 +149,14 @@ impl Default for DlpConfig {
             scan_responses: true,
         }
     }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StatsConfig {
+    /// Where the running stats counters are persisted on disk so they
+    /// survive restarts.
+    pub persist_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -718,6 +727,9 @@ allow_senders = ["alice@example.com", "@trusted.org"]
 virtual_key = "vk-email"
 email = "bot@gmail.com"
 app_password = "abcd efgh ijkl mnop"
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
         let parsed = Config::parse(cfg);
         assert!(parsed.is_ok());
@@ -743,6 +755,9 @@ deny_senders = ["bob@example.com"]
 virtual_key = "vk-email"
 email = "bot@gmail.com"
 app_password = "abcd efgh ijkl mnop"
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
         let err = Config::parse(cfg).unwrap_err();
         assert!(
@@ -769,6 +784,9 @@ mode = "denylist"
 virtual_key = "vk-email"
 email = "bot@gmail.com"
 app_password = "abcd efgh ijkl mnop"
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
         let err = Config::parse(cfg).unwrap_err();
         assert!(
@@ -796,6 +814,9 @@ allow_senders = ["not-an-email"]
 virtual_key = "vk-email"
 email = "bot@gmail.com"
 app_password = "abcd efgh ijkl mnop"
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
         let err = Config::parse(cfg).unwrap_err();
         assert!(err.to_string().contains("invalid allow_senders entry"));
@@ -821,6 +842,9 @@ default_max_results = 0
 virtual_key = "vk-email"
 email = "bot@gmail.com"
 app_password = "abcd efgh ijkl mnop"
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
         let err = Config::parse(cfg).unwrap_err();
         assert!(
@@ -850,6 +874,9 @@ email = "bot@gmail.com"
 app_password = "abcd efgh ijkl mnop"
 imap_host = "imap.gmail.com"
 imap_port = 993
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
         let parsed = Config::parse(cfg);
         assert!(parsed.is_ok());
@@ -897,6 +924,9 @@ allow_senders = ["alice@example.com"]
 virtual_key = "vk-email"
 email = "botgmail.com"
 app_password = "abcd efgh ijkl mnop"
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
         let err = Config::parse(cfg).unwrap_err();
         assert!(
@@ -998,6 +1028,9 @@ virtual_key = "vk-email"
 email = "bot@gmail.com"
 app_password = "abcd efgh ijkl mnop"
 imap_port = 0
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
         let err = Config::parse(cfg).unwrap_err();
         assert!(
@@ -1015,6 +1048,9 @@ port = 3000
 
 [upstream]
 openai_base_url = "https://api.openai.com"
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"
 "#;
         let parsed = Config::parse(cfg).expect("config should parse");
         assert_eq!(parsed.listen_addr(), "127.0.0.1:3000");

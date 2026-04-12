@@ -33,6 +33,8 @@ dlp:
       regex: "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"
       action: redact
   scan_responses: true
+stats:
+  persist_path: /var/lib/clawshell/stats.json
 log_level: debug
 derived:
   listen_addr: "0.0.0.0:8080"

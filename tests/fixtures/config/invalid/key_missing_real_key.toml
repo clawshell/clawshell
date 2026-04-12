@@ -3,3 +3,6 @@
 
 [[keys]]
 virtual_key = "vk-1"
+
+[stats]
+persist_path = "/etc/clawshell/stats.json"

@@ -53,6 +53,13 @@ patterns = [
     { name = "amex_card",       regex = '\b3[47][0-9]{13}\b',                                action = "redact" },
 ]
 
+# Runtime statistics persistence
+# ClawShell counts total requests served, upstream prompt/completion/total
+# tokens (from non-streaming responses), and per-sender email-filter
+# activity, and exposes them at GET /admin/stats (loopback-only).
+[stats]
+persist_path = "/etc/clawshell/stats.json"
+
 # Email read endpoint
 # If enabled, set exactly one mode:
 # - mode = "allowlist" with non-empty allow_senders and empty deny_senders
