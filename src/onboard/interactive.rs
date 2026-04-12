@@ -499,9 +499,9 @@ pub fn collect_onboard_config_tui() -> Result<OnboardConfig, Box<dyn std::error:
     let default_model = existing.model.as_deref().unwrap_or(match provider_choice {
         MENU_ANTHROPIC => "claude-sonnet-4-5-20250929",
         MENU_OPENROUTER => "openrouter/auto",
-        MENU_CODEX => "gpt-5.2-chat-latest",
+        MENU_CODEX => "gpt-4o",
         MENU_MINIMAX => "MiniMax-M2.7",
-        _ => "gpt-5.2-chat-latest", // OpenAI default
+        _ => "gpt-4o", // OpenAI default
     });
     let model = tui::prompt_text("Enter the model name", Some(default_model))?;
 
