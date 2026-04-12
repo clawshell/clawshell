@@ -335,7 +335,7 @@ mod tests {
 
         assert_eq!(runner.calls.len(), 4);
         assert_eq!(runner.calls[0][..3], ["config", "set", "model.provider"]);
-        assert_eq!(runner.calls[0][3], "custom");
+        assert_eq!(runner.calls[0][3], "clawshell");
         assert_eq!(runner.calls[1][2], "model.base_url");
         assert_eq!(runner.calls[1][3], "http://127.0.0.1:18790/v1");
         assert_eq!(runner.calls[2][2], "model.default");

@@ -22,7 +22,7 @@ use super::types::OnboardConfig;
 pub fn hermes_config_set_commands(config: &OnboardConfig) -> Vec<Vec<String>> {
     let base_url = format!("http://{}:{}/v1", config.server_host, config.server_port);
     vec![
-        hermes_set(&["model.provider", "custom"]),
+        hermes_set(&["model.provider", "clawshell"]),
         hermes_set(&["model.base_url", &base_url]),
         hermes_set(&["model.default", &config.model]),
         hermes_set(&["model.api_key", &config.virtual_api_key]),
@@ -51,7 +51,7 @@ mod tests {
         assert_eq!(commands.len(), 4);
         assert_eq!(
             commands[0],
-            vec!["config", "set", "model.provider", "custom"]
+            vec!["config", "set", "model.provider", "clawshell"]
         );
         assert_eq!(
             commands[1],
