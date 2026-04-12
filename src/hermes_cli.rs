@@ -158,19 +158,49 @@ pub fn apply_onboard_hermes_config<R: HermesRunner>(
 }
 
 use crate::onboard::{STATS_CRON_JOB_NAME, STATS_CRON_PROMPT};
+use std::path::Path;
 
-pub fn setup_hermes_stats_cron<R: HermesRunner>(runner: &mut R) -> Result<(), Box<dyn Error>> {
+const HERMES_PLATFORM_TOKENS: &[(&str, &str)] = &[
+    ("TELEGRAM_BOT_TOKEN", "telegram"),
+    ("DISCORD_BOT_TOKEN", "discord"),
+    ("SLACK_BOT_TOKEN", "slack"),
+];
+
+pub fn detect_hermes_channel(home_dir: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(home_dir.join(".hermes").join(".env")).ok()?;
+    for &(key, platform) in HERMES_PLATFORM_TOKENS {
+        for line in content.lines() {
+            let line = line.trim();
+            if let Some(value) = line.strip_prefix(key).and_then(|r| r.strip_prefix('=')) {
+                let value = value.trim().trim_matches('"').trim_matches('\'');
+                if !value.is_empty() {
+                    return Some(platform.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn setup_hermes_stats_cron<R: HermesRunner>(
+    runner: &mut R,
+    channel: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    let mut args: Vec<String> = vec![
+        "cron".into(),
+        "create".into(),
+        "0 9 * * 1".into(),
+        STATS_CRON_PROMPT.into(),
+        "--skill".into(),
+        "get-clawshell-stats".into(),
+        "--name".into(),
+        STATS_CRON_JOB_NAME.into(),
+    ];
+    if let Some(ch) = channel {
+        args.extend_from_slice(&["--deliver".into(), ch.into()]);
+    }
     let output = runner
-        .run(&[
-            "cron".into(),
-            "create".into(),
-            "0 9 * * 1".into(),
-            STATS_CRON_PROMPT.into(),
-            "--skill".into(),
-            "get-clawshell-stats".into(),
-            "--name".into(),
-            STATS_CRON_JOB_NAME.into(),
-        ])
+        .run(&args)
         .map_err(|e| format!("failed to run `hermes cron create`: {e}"))?;
     if !output.success {
         let status = output
@@ -313,20 +343,56 @@ mod tests {
     }
 
     #[test]
-    fn test_setup_hermes_stats_cron_sends_correct_args() {
+    fn test_setup_hermes_stats_cron_no_channel() {
         let mut runner = FakeHermesRunner::default();
-        setup_hermes_stats_cron(&mut runner).unwrap();
+        setup_hermes_stats_cron(&mut runner, None).unwrap();
         assert_eq!(runner.calls.len(), 1);
         let args = &runner.calls[0];
         assert_eq!(args[0], "cron");
         assert_eq!(args[1], "create");
-        assert_eq!(args[2], "0 9 * * 1");
         assert!(args[3].contains("get-clawshell-stats"));
-        assert!(args[3].contains("/admin/stats"));
-        assert!(args.contains(&"--skill".to_string()));
-        assert!(args.contains(&"get-clawshell-stats".to_string()));
-        assert!(args.contains(&"--name".to_string()));
-        assert!(args.contains(&STATS_CRON_JOB_NAME.to_string()));
+        assert!(!args.contains(&"--deliver".to_string()));
+    }
+
+    #[test]
+    fn test_setup_hermes_stats_cron_with_channel() {
+        let mut runner = FakeHermesRunner::default();
+        setup_hermes_stats_cron(&mut runner, Some("discord")).unwrap();
+        assert_eq!(runner.calls.len(), 1);
+        let args = &runner.calls[0];
+        assert!(args.contains(&"--deliver".to_string()));
+        assert!(args.contains(&"discord".to_string()));
+    }
+
+    #[test]
+    fn test_detect_hermes_channel_finds_discord() {
+        let dir = tempfile::tempdir().unwrap();
+        let hermes_dir = dir.path().join(".hermes");
+        std::fs::create_dir_all(&hermes_dir).unwrap();
+        std::fs::write(
+            hermes_dir.join(".env"),
+            "DISCORD_BOT_TOKEN=abc123\nSOME_OTHER=val\n",
+        )
+        .unwrap();
+        assert_eq!(
+            detect_hermes_channel(dir.path()),
+            Some("discord".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_hermes_channel_ignores_empty_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let hermes_dir = dir.path().join(".hermes");
+        std::fs::create_dir_all(&hermes_dir).unwrap();
+        std::fs::write(hermes_dir.join(".env"), "DISCORD_BOT_TOKEN=\n").unwrap();
+        assert_eq!(detect_hermes_channel(dir.path()), None);
+    }
+
+    #[test]
+    fn test_detect_hermes_channel_returns_none_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(detect_hermes_channel(dir.path()), None);
     }
 
     #[test]

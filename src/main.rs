@@ -1168,10 +1168,18 @@ fn apply_openclaw_onboarding_steps(
             onboard::upsert_managed_skill_manifest_entry(config_file, &skill.manifest_entry)?;
             tui::print_info("OpenClaw skill", &skill.path.display().to_string());
         }
-        // Set up the weekly stats cron job.
+        // Set up the weekly stats cron job, delivering to the first
+        // configured messaging channel if one is detected.
         let mut openclaw_runner = openclaw_cli::RealOpenclawRunner;
-        match openclaw_cli::setup_openclaw_stats_cron(&mut openclaw_runner) {
-            Ok(()) => tui::print_info("Cron job", "clawshell-weekly-stats (Mon 09:00)"),
+        let channel = openclaw_cli::detect_openclaw_channel(&mut openclaw_runner);
+        match openclaw_cli::setup_openclaw_stats_cron(&mut openclaw_runner, channel.as_deref()) {
+            Ok(()) => {
+                let dest = channel.as_deref().unwrap_or("log only");
+                tui::print_info(
+                    "Cron job",
+                    &format!("clawshell-weekly-stats (Mon 09:00, deliver: {dest})"),
+                );
+            }
             Err(err) => {
                 tui::print_warning(&format!("Failed to set up weekly stats cron job: {err}"))
             }
@@ -1334,10 +1342,19 @@ fn apply_hermes_onboarding_steps(
             for path in &paths {
                 tui::print_info("Hermes skill", &path.display().to_string());
             }
-            // Set up the weekly stats cron job.
+            // Set up the weekly stats cron job, delivering to the first
+            // configured messaging channel if one is detected.
+            let (home_dir, _, _) = resolve_hermes_target_user()?;
+            let channel = hermes_cli::detect_hermes_channel(&home_dir);
             let mut hermes_runner = hermes_cli::RealHermesRunner;
-            match hermes_cli::setup_hermes_stats_cron(&mut hermes_runner) {
-                Ok(()) => tui::print_info("Cron job", "clawshell-weekly-stats (Mon 09:00)"),
+            match hermes_cli::setup_hermes_stats_cron(&mut hermes_runner, channel.as_deref()) {
+                Ok(()) => {
+                    let dest = channel.as_deref().unwrap_or("log only");
+                    tui::print_info(
+                        "Cron job",
+                        &format!("clawshell-weekly-stats (Mon 09:00, deliver: {dest})"),
+                    );
+                }
                 Err(err) => {
                     tui::print_warning(&format!("Failed to set up weekly stats cron job: {err}"))
                 }

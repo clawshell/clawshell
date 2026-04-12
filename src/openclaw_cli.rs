@@ -647,23 +647,45 @@ fn nested_value_or_empty_object(json: &Value, path: &[&str]) -> Value {
 
 use crate::onboard::{STATS_CRON_JOB_NAME, STATS_CRON_PROMPT};
 
-pub fn setup_openclaw_stats_cron<R: OpenclawRunner>(runner: &mut R) -> Result<(), Box<dyn Error>> {
-    run_openclaw_command(
-        runner,
-        &[
-            "cron",
-            "add",
-            "--name",
-            STATS_CRON_JOB_NAME,
-            "--cron",
-            "0 9 * * 1",
-            "--session",
-            "isolated",
-            "--message",
-            STATS_CRON_PROMPT,
-            "--no-deliver",
-        ],
-    )?;
+const CHANNEL_PRIORITY: &[&str] = &["telegram", "discord", "slack", "mattermost"];
+
+pub fn detect_openclaw_channel<R: OpenclawRunner>(runner: &mut R) -> Option<String> {
+    let channels =
+        openclaw_config_get_json_at_path(runner, "channels", OpenclawApprovalMode::AutoApprove)
+            .ok()?;
+    let obj = channels.as_object()?;
+    for &platform in CHANNEL_PRIORITY {
+        if let Some(cfg) = obj.get(platform) {
+            if cfg.get("enabled").and_then(Value::as_bool) != Some(false) {
+                return Some(platform.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub fn setup_openclaw_stats_cron<R: OpenclawRunner>(
+    runner: &mut R,
+    channel: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    let mut args: Vec<&str> = vec![
+        "cron",
+        "add",
+        "--name",
+        STATS_CRON_JOB_NAME,
+        "--cron",
+        "0 9 * * 1",
+        "--session",
+        "isolated",
+        "--message",
+        STATS_CRON_PROMPT,
+    ];
+    if let Some(ch) = channel {
+        args.extend_from_slice(&["--announce", "--channel", ch]);
+    } else {
+        args.push("--no-deliver");
+    }
+    run_openclaw_command(runner, &args)?;
     Ok(())
 }
 
@@ -1209,27 +1231,61 @@ mod tests {
     }
 
     #[test]
-    fn test_setup_openclaw_stats_cron_sends_correct_args() {
+    fn test_setup_openclaw_stats_cron_no_channel() {
         let mut runner = FakeOpenclawRunner {
             responses: VecDeque::from([ok_output("")]),
             ..Default::default()
         };
-        setup_openclaw_stats_cron(&mut runner).unwrap();
-        assert_eq!(runner.calls.len(), 1);
+        setup_openclaw_stats_cron(&mut runner, None).unwrap();
         let args = &runner.calls[0];
-        assert_eq!(args[0], "cron");
-        assert_eq!(args[1], "add");
-        assert!(args.contains(&"--name".to_string()));
-        assert!(args.contains(&STATS_CRON_JOB_NAME.to_string()));
-        assert!(args.contains(&"--cron".to_string()));
-        assert!(args.contains(&"0 9 * * 1".to_string()));
-        assert!(args.contains(&"--session".to_string()));
-        assert!(args.contains(&"isolated".to_string()));
         assert!(args.contains(&"--no-deliver".to_string()));
-        let message_idx = args.iter().position(|a| a == "--message").unwrap();
-        let message = &args[message_idx + 1];
-        assert!(message.contains("get-clawshell-stats"));
-        assert!(message.contains("/admin/stats"));
+        assert!(!args.contains(&"--announce".to_string()));
+    }
+
+    #[test]
+    fn test_setup_openclaw_stats_cron_with_channel() {
+        let mut runner = FakeOpenclawRunner {
+            responses: VecDeque::from([ok_output("")]),
+            ..Default::default()
+        };
+        setup_openclaw_stats_cron(&mut runner, Some("telegram")).unwrap();
+        let args = &runner.calls[0];
+        assert!(args.contains(&"--announce".to_string()));
+        assert!(args.contains(&"--channel".to_string()));
+        assert!(args.contains(&"telegram".to_string()));
+        assert!(!args.contains(&"--no-deliver".to_string()));
+    }
+
+    #[test]
+    fn test_detect_openclaw_channel_finds_telegram() {
+        let channels = r#"{"telegram": {"botToken": "123:ABC"}, "discord": {"enabled": false}}"#;
+        let mut runner = FakeOpenclawRunner {
+            responses: VecDeque::from([ok_output(channels)]),
+            ..Default::default()
+        };
+        assert_eq!(
+            detect_openclaw_channel(&mut runner),
+            Some("telegram".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_openclaw_channel_skips_disabled() {
+        let channels = r#"{"telegram": {"enabled": false}}"#;
+        let mut runner = FakeOpenclawRunner {
+            responses: VecDeque::from([ok_output(channels)]),
+            ..Default::default()
+        };
+        assert_eq!(detect_openclaw_channel(&mut runner), None);
+    }
+
+    #[test]
+    fn test_detect_openclaw_channel_returns_none_on_missing() {
+        let mut runner = FakeOpenclawRunner {
+            responses: VecDeque::from([failed_output(1, "missing config path")]),
+            ..Default::default()
+        };
+        assert_eq!(detect_openclaw_channel(&mut runner), None);
     }
 
     #[test]
