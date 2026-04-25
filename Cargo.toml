@@ -9,7 +9,7 @@ exclude = ["npm/*", "docs/*"]
 description = "A security privileged process for the OpenClaw ecosystem."
 
 [dependencies]
-axum = "0.8.8"
+axum = "0.8.9"
 tokio = { version = "1.51", features = ["full"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["stream", "rustls", "form", "blocking", "json"] }
 rustls = { version = "0.23.37", default-features = false, features = ["ring", "std"] }
