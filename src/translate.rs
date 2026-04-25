@@ -384,11 +384,7 @@ impl TranslateStream {
     }
 
     fn process_buffered_lines(&mut self) {
-        loop {
-            let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') else {
-                break;
-            };
-
+        while let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
             let line_bytes = self.buffer.split_to(pos + 1);
             let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
 
@@ -547,11 +543,7 @@ impl DlpSseStream {
     }
 
     fn process_buffered_lines(&mut self) {
-        loop {
-            let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') else {
-                break;
-            };
-
+        while let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
             let line_bytes = self.buffer.split_to(pos + 1);
             let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
 

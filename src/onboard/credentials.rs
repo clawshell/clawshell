@@ -423,13 +423,9 @@ fn remove_profile_references_from_value(
             }
             removed
         }
-        Value::String(v) => {
-            if removed_profile_ids.contains(v) {
-                *value = Value::Null;
-                1
-            } else {
-                0
-            }
+        Value::String(v) if removed_profile_ids.contains(v) => {
+            *value = Value::Null;
+            1
         }
         _ => 0,
     }
