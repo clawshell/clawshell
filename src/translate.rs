@@ -4,6 +4,7 @@ use axum::body::Body;
 use bytes::{Bytes, BytesMut};
 use futures_util::Stream;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -19,7 +20,7 @@ pub enum TranslateError {
 }
 
 /// Fields that are compatible between chat/completions and responses API.
-const PASSTHROUGH_FIELDS: &[&str] = &["model", "stream", "temperature", "top_p", "stop"];
+const PASSTHROUGH_FIELDS: &[&str] = &["model", "stream", "top_p", "stop"];
 
 /// Fields that must be stripped from chat/completions requests (not supported by responses API).
 const STRIP_FIELDS: &[&str] = &[
@@ -60,7 +61,7 @@ pub fn chat_completions_to_responses(body: &[u8]) -> Result<Vec<u8>, TranslateEr
                 system_parts.push(content);
             }
         } else {
-            input.push(convert_message_content(msg.clone()));
+            input.extend(convert_message_to_input_items(msg));
         }
     }
 
@@ -83,6 +84,17 @@ pub fn chat_completions_to_responses(body: &[u8]) -> Result<Vec<u8>, TranslateEr
         }
     }
 
+    if let Some(tools) = obj.get("tools").and_then(Value::as_array) {
+        let converted_tools: Vec<Value> = tools.iter().filter_map(convert_tool).collect();
+        if !converted_tools.is_empty() {
+            result.insert("tools".to_string(), Value::Array(converted_tools));
+        }
+    }
+
+    if let Some(tool_choice) = obj.get("tool_choice").and_then(convert_tool_choice) {
+        result.insert("tool_choice".to_string(), tool_choice);
+    }
+
     // Strip incompatible fields — they are simply not copied over.
     // (No action needed since we build a new object.)
     let _ = STRIP_FIELDS; // acknowledge the constant is used by design
@@ -90,14 +102,34 @@ pub fn chat_completions_to_responses(body: &[u8]) -> Result<Vec<u8>, TranslateEr
     Ok(serde_json::to_vec(&Value::Object(result))?)
 }
 
-/// Convert a chat/completions message to a Responses API input item.
+/// Convert a chat/completions message to one or more Responses API input items.
 /// - Adds `type: "message"` (required by Responses API)
 /// - For user messages: converts content `type: "text"` → `type: "input_text"`
 /// - For assistant messages: converts content `type: "text"` → `type: "output_text"`
 /// - Converts content `type: "image_url"` → `type: "input_image"`
+/// - Converts tool output messages to `function_call_output` items.
+/// - Converts assistant tool_calls to `function_call` items.
 /// - String content is left as-is (the Responses API accepts string content directly).
-fn convert_message_content(mut msg: Value) -> Value {
+fn convert_message_to_input_items(msg: &Value) -> Vec<Value> {
     let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
+    if role == "tool" {
+        let call_id = msg
+            .get("tool_call_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let output = msg
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        return vec![serde_json::json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output,
+        })];
+    }
+
+    let mut items = Vec::new();
+    let mut msg = msg.clone();
     let is_assistant = role == "assistant";
 
     // Responses API requires "type": "message" on each input item
@@ -107,33 +139,151 @@ fn convert_message_content(mut msg: Value) -> Value {
         }
     }
 
-    let Some(content) = msg.get_mut("content") else {
-        return msg;
-    };
-    let Some(parts) = content.as_array_mut() else {
-        // String content — no conversion needed
-        return msg;
-    };
-    for part in parts.iter_mut() {
-        let Some(obj) = part.as_object_mut() else {
-            continue;
-        };
-        match obj.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                let text_type = if is_assistant {
-                    "output_text"
-                } else {
-                    "input_text"
-                };
-                obj.insert("type".to_string(), Value::String(text_type.to_string()));
+    let has_content = msg
+        .get("content")
+        .is_some_and(|content| !content.is_null() && content != "");
+    if has_content {
+        if let Some(content) = msg.get_mut("content") {
+            if let Some(parts) = content.as_array_mut() {
+                for part in parts.iter_mut() {
+                    let Some(obj) = part.as_object_mut() else {
+                        continue;
+                    };
+                    match obj.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            let text_type = if is_assistant {
+                                "output_text"
+                            } else {
+                                "input_text"
+                            };
+                            obj.insert("type".to_string(), Value::String(text_type.to_string()));
+                        }
+                        Some("image_url") => {
+                            obj.insert(
+                                "type".to_string(),
+                                Value::String("input_image".to_string()),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
             }
-            Some("image_url") => {
-                obj.insert("type".to_string(), Value::String("input_image".to_string()));
-            }
-            _ => {}
+        }
+        items.push(msg.clone());
+    }
+
+    if let Some(tool_calls) = msg.get("tool_calls").and_then(Value::as_array) {
+        for tool_call in tool_calls {
+            let Some(function) = tool_call.get("function") else {
+                continue;
+            };
+            let Some(name) = function.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let call_id = tool_call
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let arguments = function
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            items.push(serde_json::json!({
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments,
+            }));
         }
     }
-    msg
+
+    if items.is_empty() {
+        items.push(msg);
+    }
+    items
+}
+
+fn convert_tool(tool: &Value) -> Option<Value> {
+    if tool.get("type").and_then(Value::as_str) != Some("function") {
+        return None;
+    }
+    let function = tool.get("function")?.as_object()?;
+    let name = function.get("name")?.clone();
+    let mut converted = serde_json::Map::new();
+    converted.insert("type".to_string(), Value::String("function".to_string()));
+    converted.insert("name".to_string(), name);
+    for field in ["description", "parameters", "strict"] {
+        if let Some(value) = function.get(field).or_else(|| tool.get(field)) {
+            converted.insert(field.to_string(), value.clone());
+        }
+    }
+    Some(Value::Object(converted))
+}
+
+fn convert_tool_choice(tool_choice: &Value) -> Option<Value> {
+    if tool_choice.is_string() {
+        return Some(tool_choice.clone());
+    }
+    let obj = tool_choice.as_object()?;
+    if obj.get("type").and_then(Value::as_str) == Some("function") {
+        if let Some(name) = obj
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(Value::as_str)
+        {
+            return Some(serde_json::json!({
+                "type": "function",
+                "name": name,
+            }));
+        }
+    }
+    None
+}
+
+fn response_output_to_chat_message(obj: &serde_json::Map<String, Value>) -> (String, Vec<Value>) {
+    let mut content_parts: Vec<&str> = Vec::new();
+    let mut tool_calls = Vec::new();
+
+    if let Some(output) = obj.get("output").and_then(Value::as_array) {
+        for item in output {
+            match item.get("type").and_then(Value::as_str) {
+                Some("message") => {
+                    if let Some(content) = item.get("content").and_then(Value::as_array) {
+                        for part in content {
+                            if part.get("type").and_then(Value::as_str) == Some("output_text") {
+                                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                    content_parts.push(text);
+                                }
+                            }
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    let id = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    tool_calls.push(serde_json::json!({
+                        "id": id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": arguments,
+                        }
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (content_parts.join(""), tool_calls)
 }
 
 /// Translate a `/v1/responses` response body to `/v1/chat/completions` format.
@@ -152,27 +302,11 @@ pub fn responses_to_chat_completion(body: &[u8]) -> Result<Vec<u8>, TranslateErr
         .and_then(Value::as_str)
         .unwrap_or("unknown");
 
-    // Extract text content from output[].content[].text where type == "output_text"
-    let mut content_parts: Vec<&str> = Vec::new();
-    if let Some(output) = obj.get("output").and_then(Value::as_array) {
-        for item in output {
-            if item.get("type").and_then(Value::as_str) == Some("message") {
-                if let Some(content) = item.get("content").and_then(Value::as_array) {
-                    for part in content {
-                        if part.get("type").and_then(Value::as_str) == Some("output_text") {
-                            if let Some(text) = part.get("text").and_then(Value::as_str) {
-                                content_parts.push(text);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let content = content_parts.join("");
+    let (content, tool_calls) = response_output_to_chat_message(obj);
 
     // Map status → finish_reason
     let finish_reason = match obj.get("status").and_then(Value::as_str) {
+        Some("completed") | None if !tool_calls.is_empty() => "tool_calls",
         Some("completed") | None => "stop",
         Some("incomplete") => "length",
         Some("failed") => "stop",
@@ -192,16 +326,21 @@ pub fn responses_to_chat_completion(body: &[u8]) -> Result<Vec<u8>, TranslateErr
         serde_json::json!({ "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 })
     };
 
+    let mut message = serde_json::json!({
+        "role": "assistant",
+        "content": if tool_calls.is_empty() { Value::String(content) } else { Value::Null },
+    });
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = Value::Array(tool_calls);
+    }
+
     let result = serde_json::json!({
         "id": id,
         "object": "chat.completion",
         "model": model,
         "choices": [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": content,
-            },
+            "message": message,
             "finish_reason": finish_reason,
         }],
         "usage": usage,
@@ -306,6 +445,8 @@ pub fn translate_sse_line(
     line: &str,
     response_id: &mut Option<String>,
     model: &mut Option<String>,
+    tool_call_indices: &mut HashMap<u64, usize>,
+    next_tool_call_index: &mut usize,
 ) -> Option<String> {
     // Pass through [DONE]
     if line.starts_with("data: [DONE]") {
@@ -352,9 +493,91 @@ pub fn translate_sse_line(
             ))
         }
 
+        "response.output_item.added" => {
+            let output_index = event.get("output_index").and_then(Value::as_u64)?;
+            let item = event.get("item")?;
+            if item.get("type").and_then(Value::as_str) != Some("function_call") {
+                return None;
+            }
+            let index = *next_tool_call_index;
+            *next_tool_call_index += 1;
+            tool_call_indices.insert(output_index, index);
+
+            let id = response_id.as_deref().unwrap_or("chatcmpl-translate");
+            let m = model.as_deref().unwrap_or("unknown");
+            let call_id = item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let name = item.get("name").and_then(Value::as_str).unwrap_or_default();
+            let arguments = item
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let chunk = serde_json::json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "model": m,
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": index,
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": arguments,
+                            }
+                        }]
+                    },
+                    "finish_reason": null,
+                }]
+            });
+            Some(format!(
+                "data: {}",
+                serde_json::to_string(&chunk).unwrap_or_default()
+            ))
+        }
+
+        "response.function_call_arguments.delta" => {
+            let output_index = event.get("output_index").and_then(Value::as_u64)?;
+            let index = *tool_call_indices.get(&output_index)?;
+            let delta = event.get("delta").and_then(Value::as_str).unwrap_or("");
+            let id = response_id.as_deref().unwrap_or("chatcmpl-translate");
+            let m = model.as_deref().unwrap_or("unknown");
+            let chunk = serde_json::json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "model": m,
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": index,
+                            "function": {
+                                "arguments": delta,
+                            }
+                        }]
+                    },
+                    "finish_reason": null,
+                }]
+            });
+            Some(format!(
+                "data: {}",
+                serde_json::to_string(&chunk).unwrap_or_default()
+            ))
+        }
+
         "response.completed" => {
             let id = response_id.as_deref().unwrap_or("chatcmpl-translate");
             let m = model.as_deref().unwrap_or("unknown");
+            let finish_reason = if tool_call_indices.is_empty() {
+                "stop"
+            } else {
+                "tool_calls"
+            };
             let final_chunk = serde_json::json!({
                 "id": id,
                 "object": "chat.completion.chunk",
@@ -362,7 +585,7 @@ pub fn translate_sse_line(
                 "choices": [{
                     "index": 0,
                     "delta": {},
-                    "finish_reason": "stop",
+                    "finish_reason": finish_reason,
                 }]
             });
             Some(format!(
@@ -411,9 +634,9 @@ pub fn translate_sse_line(
 
         // Suppress all structural/metadata events
         "response.output_text.done"
+        | "response.function_call_arguments.done"
         | "response.content_part.added"
         | "response.content_part.done"
-        | "response.output_item.added"
         | "response.output_item.done" => None,
 
         // Suppress any other unknown events
@@ -428,6 +651,8 @@ pub struct TranslateStream {
     buffer: BytesMut,
     response_id: Option<String>,
     model: Option<String>,
+    tool_call_indices: HashMap<u64, usize>,
+    next_tool_call_index: usize,
     output_buffer: Vec<u8>,
 }
 
@@ -437,6 +662,7 @@ impl std::fmt::Debug for TranslateStream {
             .field("buffer_len", &self.buffer.len())
             .field("response_id", &self.response_id)
             .field("model", &self.model)
+            .field("tool_call_indices", &self.tool_call_indices)
             .finish()
     }
 }
@@ -458,6 +684,8 @@ impl TranslateStream {
             buffer: BytesMut::new(),
             response_id: None,
             model: None,
+            tool_call_indices: HashMap::new(),
+            next_tool_call_index: 0,
             output_buffer: Vec::new(),
         }
     }
@@ -474,7 +702,11 @@ impl TranslateStream {
 
             let rid = &mut self.response_id;
             let mdl = &mut self.model;
-            if let Some(translated) = translate_sse_line(&line, rid, mdl) {
+            let tool_indices = &mut self.tool_call_indices;
+            let next_tool_index = &mut self.next_tool_call_index;
+            if let Some(translated) =
+                translate_sse_line(&line, rid, mdl, tool_indices, next_tool_index)
+            {
                 self.output_buffer.extend_from_slice(translated.as_bytes());
                 self.output_buffer.extend_from_slice(b"\n\n");
             }
@@ -508,9 +740,13 @@ impl Stream for TranslateStream {
                         let remaining = std::mem::take(&mut this.buffer);
                         let line = String::from_utf8_lossy(&remaining).trim().to_string();
                         if !line.is_empty() {
-                            if let Some(translated) =
-                                translate_sse_line(&line, &mut this.response_id, &mut this.model)
-                            {
+                            if let Some(translated) = translate_sse_line(
+                                &line,
+                                &mut this.response_id,
+                                &mut this.model,
+                                &mut this.tool_call_indices,
+                                &mut this.next_tool_call_index,
+                            ) {
                                 return Poll::Ready(Some(Ok(Bytes::from(format!(
                                     "{translated}\n\n"
                                 )))));
@@ -701,6 +937,22 @@ pub fn wrap_body_with_dlp_sse_stream(
 mod tests {
     use super::*;
 
+    fn translate_test_sse_line(
+        line: &str,
+        response_id: &mut Option<String>,
+        model: &mut Option<String>,
+    ) -> Option<String> {
+        let mut tool_call_indices = HashMap::new();
+        let mut next_tool_call_index = 0;
+        translate_sse_line(
+            line,
+            response_id,
+            model,
+            &mut tool_call_indices,
+            &mut next_tool_call_index,
+        )
+    }
+
     #[test]
     fn test_chat_to_responses_basic() {
         let body = serde_json::json!({
@@ -818,9 +1070,81 @@ mod tests {
         assert_eq!(parsed["model"], "gpt-4o-mini");
         assert_eq!(parsed["stream"], true);
         assert!(parsed.get("stream_options").is_none());
-        assert_eq!(parsed["temperature"], 0.7);
+        assert!(parsed.get("temperature").is_none());
         assert_eq!(parsed["top_p"], 0.9);
         assert_eq!(parsed["stop"], serde_json::json!(["\n"]));
+    }
+
+    #[test]
+    fn test_chat_to_responses_converts_tools() {
+        let body = serde_json::json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "list files"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "terminal",
+                    "description": "Execute shell commands",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"}
+                        },
+                        "required": ["command"]
+                    }
+                }
+            }],
+            "tool_choice": "auto"
+        });
+        let result = chat_completions_to_responses(body.to_string().as_bytes()).unwrap();
+        let parsed: Value = serde_json::from_slice(&result).unwrap();
+
+        assert_eq!(parsed["tools"][0]["type"], "function");
+        assert_eq!(parsed["tools"][0]["name"], "terminal");
+        assert_eq!(parsed["tools"][0]["description"], "Execute shell commands");
+        assert_eq!(
+            parsed["tools"][0]["parameters"]["properties"]["command"]["type"],
+            "string"
+        );
+        assert_eq!(parsed["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn test_chat_to_responses_converts_tool_messages() {
+        let body = serde_json::json!({
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "user", "content": "list files"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "terminal",
+                            "arguments": "{\"command\":\"ls\"}"
+                        }
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_123",
+                    "content": "README.md\nsrc"
+                }
+            ]
+        });
+        let result = chat_completions_to_responses(body.to_string().as_bytes()).unwrap();
+        let parsed: Value = serde_json::from_slice(&result).unwrap();
+        let input = parsed["input"].as_array().unwrap();
+
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["call_id"], "call_123");
+        assert_eq!(input[1]["name"], "terminal");
+        assert_eq!(input[1]["arguments"], "{\"command\":\"ls\"}");
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["call_id"], "call_123");
+        assert_eq!(input[2]["output"], "README.md\nsrc");
     }
 
     #[test]
@@ -877,6 +1201,40 @@ mod tests {
     }
 
     #[test]
+    fn test_responses_to_chat_completion_tool_call() {
+        let body = serde_json::json!({
+            "id": "resp_tools",
+            "model": "gpt-4o",
+            "status": "completed",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_123",
+                "name": "terminal",
+                "arguments": "{\"command\":\"ls\"}"
+            }],
+            "usage": {
+                "input_tokens": 50,
+                "output_tokens": 25
+            }
+        });
+        let result = responses_to_chat_completion(body.to_string().as_bytes()).unwrap();
+        let parsed: Value = serde_json::from_slice(&result).unwrap();
+        let choice = &parsed["choices"][0];
+
+        assert_eq!(choice["finish_reason"], "tool_calls");
+        assert!(choice["message"]["content"].is_null());
+        assert_eq!(choice["message"]["tool_calls"][0]["id"], "call_123");
+        assert_eq!(
+            choice["message"]["tool_calls"][0]["function"]["name"],
+            "terminal"
+        );
+        assert_eq!(
+            choice["message"]["tool_calls"][0]["function"]["arguments"],
+            "{\"command\":\"ls\"}"
+        );
+    }
+
+    #[test]
     fn test_responses_to_chat_completion_incomplete() {
         let body = serde_json::json!({
             "id": "resp_inc",
@@ -903,7 +1261,7 @@ mod tests {
         let line = format!("data: {}", event);
         let mut response_id = Some("resp_123".to_string());
         let mut model = Some("gpt-4o-mini".to_string());
-        let result = translate_sse_line(&line, &mut response_id, &mut model).unwrap();
+        let result = translate_test_sse_line(&line, &mut response_id, &mut model).unwrap();
 
         assert!(result.starts_with("data: "));
         let json_str = result.strip_prefix("data: ").unwrap();
@@ -925,7 +1283,7 @@ mod tests {
         let line = format!("data: {}", event);
         let mut response_id = Some("resp_456".to_string());
         let mut model = Some("gpt-4o".to_string());
-        let result = translate_sse_line(&line, &mut response_id, &mut model).unwrap();
+        let result = translate_test_sse_line(&line, &mut response_id, &mut model).unwrap();
 
         // Should contain a final chunk with finish_reason: "stop" and then [DONE]
         assert!(result.contains("\"finish_reason\":\"stop\""));
@@ -942,7 +1300,7 @@ mod tests {
             "response": {"id": "resp_789", "model": "gpt-4o"}
         });
         let result =
-            translate_sse_line(&format!("data: {}", created), &mut response_id, &mut model);
+            translate_test_sse_line(&format!("data: {}", created), &mut response_id, &mut model);
         assert!(result.is_none());
         assert_eq!(response_id.as_deref(), Some("resp_789"));
         assert_eq!(model.as_deref(), Some("gpt-4o"));
@@ -951,7 +1309,7 @@ mod tests {
             "type": "response.in_progress",
             "response": {"id": "resp_789"}
         });
-        let result = translate_sse_line(
+        let result = translate_test_sse_line(
             &format!("data: {}", in_progress),
             &mut response_id,
             &mut model,
@@ -960,7 +1318,7 @@ mod tests {
 
         // Structural events should also be suppressed
         let content_part = serde_json::json!({"type": "response.content_part.added"});
-        let result = translate_sse_line(
+        let result = translate_test_sse_line(
             &format!("data: {}", content_part),
             &mut response_id,
             &mut model,
@@ -972,8 +1330,74 @@ mod tests {
     fn test_sse_done_passthrough() {
         let mut response_id = None;
         let mut model = None;
-        let result = translate_sse_line("data: [DONE]", &mut response_id, &mut model);
+        let result = translate_test_sse_line("data: [DONE]", &mut response_id, &mut model);
         assert_eq!(result, Some("data: [DONE]".to_string()));
+    }
+
+    #[test]
+    fn test_sse_tool_call_chunks() {
+        let mut response_id = Some("resp_123".to_string());
+        let mut model = Some("gpt-4o".to_string());
+        let mut tool_call_indices = HashMap::new();
+        let mut next_tool_call_index = 0;
+
+        let added = serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_123",
+                "name": "terminal",
+                "arguments": ""
+            }
+        });
+        let result = translate_sse_line(
+            &format!("data: {}", added),
+            &mut response_id,
+            &mut model,
+            &mut tool_call_indices,
+            &mut next_tool_call_index,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(result.strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(parsed["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+        assert_eq!(
+            parsed["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+            "terminal"
+        );
+
+        let delta = serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "delta": "{\"command\":\"ls\"}"
+        });
+        let result = translate_sse_line(
+            &format!("data: {}", delta),
+            &mut response_id,
+            &mut model,
+            &mut tool_call_indices,
+            &mut next_tool_call_index,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(result.strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(
+            parsed["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            "{\"command\":\"ls\"}"
+        );
+
+        let completed = serde_json::json!({
+            "type": "response.completed",
+            "response": {"id": "resp_123", "status": "completed"}
+        });
+        let result = translate_sse_line(
+            &format!("data: {}", completed),
+            &mut response_id,
+            &mut model,
+            &mut tool_call_indices,
+            &mut next_tool_call_index,
+        )
+        .unwrap();
+        assert!(result.contains("\"finish_reason\":\"tool_calls\""));
     }
 
     #[test]
