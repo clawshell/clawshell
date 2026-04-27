@@ -71,7 +71,7 @@ impl ProxyClient {
 
         // Inject the real API key based on provider
         match provider {
-            Provider::Openai | Provider::Openrouter | Provider::Minimax => {
+            Provider::Openai | Provider::Openrouter | Provider::Minimax | Provider::Opencode => {
                 req_headers.insert(
                     AUTHORIZATION,
                     HeaderValue::from_str(&format!("Bearer {}", real_key))

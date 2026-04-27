@@ -996,6 +996,59 @@ async fn test_openai_and_openrouter_keys_map_to_distinct_real_keys() {
     assert_eq!(openrouter_resp.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn test_opencode_key_uses_zen_upstream() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer sk-opencode-real"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "provider": "opencode"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut key_map = BTreeMap::new();
+    key_map.insert(
+        "vk-opencode".to_string(),
+        ResolvedKey {
+            source: KeySource::Static {
+                real_key: "sk-opencode-real".to_string(),
+            },
+            provider: Provider::Opencode,
+        },
+    );
+
+    let mut upstream_urls = BTreeMap::new();
+    upstream_urls.insert(Provider::Opencode, mock_server.uri());
+
+    let app = build_router(AppState {
+        key_manager: Arc::new(KeyManager::new(key_map)),
+        dlp_scanner: Arc::new(DlpScanner::new(&[], false).unwrap()),
+        proxy_client: Arc::new(ProxyClient::with_upstream_urls(
+            upstream_urls,
+            "2023-06-01".to_string(),
+        )),
+        oauth_registry: Arc::new(OAuthRegistry::new(Default::default())),
+        email_enabled: false,
+        email_policy: None,
+        email_accounts: Arc::new(BTreeMap::new()),
+        email_service: Arc::new(EmailService::mock_disabled()),
+        stats: Arc::new(Stats::new(None)),
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk-opencode")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 // ========== DLP Redaction Tests ==========
 
 fn make_app_with_redact(upstream_url: &str) -> axum::Router {

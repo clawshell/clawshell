@@ -12,6 +12,7 @@ pub enum Provider {
     Openrouter,
     Anthropic,
     Minimax,
+    Opencode,
 }
 
 impl Provider {
@@ -21,6 +22,7 @@ impl Provider {
             Provider::Openrouter => "https://openrouter.ai/api",
             Provider::Anthropic => "https://api.anthropic.com",
             Provider::Minimax => "https://api.minimax.io",
+            Provider::Opencode => "https://opencode.ai/zen",
         }
     }
 }
@@ -82,6 +84,10 @@ pub struct UpstreamConfig {
     pub anthropic_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minimax_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_zen_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_go_base_url: Option<String>,
 }
 
 fn default_anthropic_version() -> String {
@@ -445,6 +451,11 @@ impl Config {
                 .minimax_base_url
                 .clone()
                 .unwrap_or_else(|| Provider::Minimax.default_base_url().to_string()),
+            Provider::Opencode => self
+                .upstream
+                .opencode_zen_base_url
+                .clone()
+                .unwrap_or_else(|| Provider::Opencode.default_base_url().to_string()),
         }
     }
 

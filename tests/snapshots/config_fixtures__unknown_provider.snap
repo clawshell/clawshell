@@ -1,10 +1,10 @@
 ---
 source: src/config.rs
-assertion_line: 651
+assertion_line: 669
 expression: err.to_string()
 ---
 TOML parse error at line 7, column 12
   |
 7 | provider = "azure"
   |            ^^^^^^^
-unknown variant `azure`, expected one of `openai`, `openrouter`, `anthropic`, `minimax`
+unknown variant `azure`, expected one of `openai`, `openrouter`, `anthropic`, `minimax`, `opencode`

@@ -60,6 +60,7 @@ impl AppState {
             config.upstream_url(Provider::Anthropic),
         );
         upstream_urls.insert(Provider::Minimax, config.upstream_url(Provider::Minimax));
+        upstream_urls.insert(Provider::Opencode, config.upstream_url(Provider::Opencode));
 
         // Build key mappings for both static and OAuth keys
         let mut key_mappings: BTreeMap<String, ResolvedKey> = BTreeMap::new();
