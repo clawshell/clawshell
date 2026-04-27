@@ -1021,16 +1021,20 @@ async fn maybe_translate_response(
         None => return Ok(response),
     };
 
-    let is_streaming = stream_requested
-        || response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.contains("text/event-stream"));
+    let upstream_is_sse = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream"));
 
-    debug!(format = ?format, is_streaming, "maybe_translate_response: translating response");
+    debug!(
+        format = ?format,
+        stream_requested,
+        upstream_is_sse,
+        "maybe_translate_response: translating response"
+    );
 
-    if is_streaming {
+    if stream_requested {
         let (parts, body) = response.into_parts();
         let translated_body = match format {
             crate::oauth::ResponseFormat::ResponsesApi => {
@@ -1056,9 +1060,20 @@ async fn maybe_translate_response(
 
     match format {
         crate::oauth::ResponseFormat::ResponsesApi => {
-            match crate::translate::responses_to_chat_completion(&body_bytes) {
+            let translated = if upstream_is_sse {
+                crate::translate::responses_sse_to_chat_completion(&body_bytes)
+            } else {
+                crate::translate::responses_to_chat_completion(&body_bytes)
+            };
+
+            match translated {
                 Ok(translated) => {
+                    parts.headers.remove("content-type");
                     parts.headers.remove("content-length");
+                    parts.headers.insert(
+                        axum::http::header::CONTENT_TYPE,
+                        axum::http::HeaderValue::from_static("application/json"),
+                    );
                     Ok(Response::from_parts(parts, Body::from(translated)))
                 }
                 Err(e) => {

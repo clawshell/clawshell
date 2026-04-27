@@ -19,14 +19,7 @@ pub enum TranslateError {
 }
 
 /// Fields that are compatible between chat/completions and responses API.
-const PASSTHROUGH_FIELDS: &[&str] = &[
-    "model",
-    "stream",
-    "stream_options",
-    "temperature",
-    "top_p",
-    "stop",
-];
+const PASSTHROUGH_FIELDS: &[&str] = &["model", "stream", "temperature", "top_p", "stop"];
 
 /// Fields that must be stripped from chat/completions requests (not supported by responses API).
 const STRIP_FIELDS: &[&str] = &[
@@ -212,6 +205,92 @@ pub fn responses_to_chat_completion(body: &[u8]) -> Result<Vec<u8>, TranslateErr
             "finish_reason": finish_reason,
         }],
         "usage": usage,
+    });
+
+    Ok(serde_json::to_vec(&result)?)
+}
+
+/// Translate a Responses API SSE body to a non-streaming `/v1/chat/completions` response.
+pub fn responses_sse_to_chat_completion(body: &[u8]) -> Result<Vec<u8>, TranslateError> {
+    let text = String::from_utf8_lossy(body);
+
+    let mut response_id: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut content = String::new();
+    let mut finish_reason = "stop";
+    let mut input_tokens = 0_u64;
+    let mut output_tokens = 0_u64;
+
+    for line in text.lines() {
+        let Some(json_str) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let json_str = json_str.trim();
+        if json_str.is_empty() || json_str == "[DONE]" {
+            continue;
+        }
+
+        let event: Value = serde_json::from_str(json_str)?;
+        match event.get("type").and_then(Value::as_str) {
+            Some("response.created")
+            | Some("response.in_progress")
+            | Some("response.completed") => {
+                if let Some(resp) = event.get("response") {
+                    if let Some(id) = resp.get("id").and_then(Value::as_str) {
+                        response_id = Some(id.to_string());
+                    }
+                    if let Some(m) = resp.get("model").and_then(Value::as_str) {
+                        model = Some(m.to_string());
+                    }
+                    if let Some(status) = resp.get("status").and_then(Value::as_str) {
+                        finish_reason = match status {
+                            "incomplete" => "length",
+                            _ => "stop",
+                        };
+                    }
+                    if let Some(usage) = resp.get("usage") {
+                        input_tokens = usage
+                            .get("input_tokens")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(input_tokens);
+                        output_tokens = usage
+                            .get("output_tokens")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(output_tokens);
+                    }
+                }
+            }
+            Some("response.output_text.delta") => {
+                if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                    content.push_str(delta);
+                }
+            }
+            Some("response.output_text.done") => {
+                if let Some(text) = event.get("text").and_then(Value::as_str) {
+                    content = text.to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let result = serde_json::json!({
+        "id": response_id.unwrap_or_else(|| "chatcmpl-translate".to_string()),
+        "object": "chat.completion",
+        "model": model.unwrap_or_else(|| "unknown".to_string()),
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content,
+            },
+            "finish_reason": finish_reason,
+        }],
+        "usage": {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
     });
 
     Ok(serde_json::to_vec(&result)?)
@@ -738,10 +817,7 @@ mod tests {
 
         assert_eq!(parsed["model"], "gpt-4o-mini");
         assert_eq!(parsed["stream"], true);
-        assert_eq!(
-            parsed["stream_options"],
-            serde_json::json!({"include_usage": true})
-        );
+        assert!(parsed.get("stream_options").is_none());
         assert_eq!(parsed["temperature"], 0.7);
         assert_eq!(parsed["top_p"], 0.9);
         assert_eq!(parsed["stop"], serde_json::json!(["\n"]));
