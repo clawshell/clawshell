@@ -32,7 +32,7 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [blacksmith-4vcpu-ubuntu-2404, macos-latest]
 
 
     steps:
@@ -61,7 +61,7 @@ jobs:
       run: cargo tarpaulin --verbose
 
   audit:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     name: Cargo udeps and audit
     needs: tests
 
@@ -87,7 +87,7 @@ jobs:
   # https://github.com/orgs/community/discussions/12395#discussioncomment-12970019
   check-workflow-status:
     name: Check Workflow Status
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: always()
 
     needs:
