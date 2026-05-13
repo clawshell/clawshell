@@ -660,7 +660,10 @@ fn normalize_search_term(value: &str) -> Option<String> {
 }
 
 fn imap_quote(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    // RFC 3501: quoted strings must not contain CR or LF.
+    // Strip them before escaping to prevent IMAP command injection.
+    let sanitized = value.replace('\r', "").replace('\n', "");
+    let escaped = sanitized.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
 }
 
@@ -1148,5 +1151,23 @@ mod tests {
         assert!(is_gmail_imap_host("IMAP.GOOGLEMAIL.COM"));
         assert!(!is_gmail_imap_host("imap.mail.yahoo.com"));
         assert!(!is_gmail_imap_host("imap.example.com"));
+    }
+
+    #[test]
+    fn test_imap_quote_strips_crlf_injection() {
+        // A payload that would inject an extra IMAP command if \r\n were not removed.
+        let malicious = "x\r\nA001 STORE 1 +FLAGS (\\Deleted)";
+        let quoted = imap_quote(malicious);
+        assert!(!quoted.contains('\r'), "CR must be stripped");
+        assert!(!quoted.contains('\n'), "LF must be stripped");
+        // The output should still be a valid quoted string.
+        assert!(quoted.starts_with('"'));
+        assert!(quoted.ends_with('"'));
+    }
+
+    #[test]
+    fn test_imap_quote_escapes_backslash_and_quote() {
+        let quoted = imap_quote(r#"say "hello" \ world"#);
+        assert_eq!(quoted, r#""say \"hello\" \\ world""#);
     }
 }
