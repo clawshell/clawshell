@@ -129,21 +129,24 @@ fn convert_message_to_input_items(msg: &Value) -> Vec<Value> {
     }
 
     let mut items = Vec::new();
-    let mut msg = msg.clone();
+    let mut input_message = serde_json::Map::new();
+    input_message.insert("role".to_string(), Value::String(role.to_string()));
+    if let Some(content) = msg.get("content") {
+        input_message.insert("content".to_string(), content.clone());
+    }
+    if let Some(phase) = msg.get("phase") {
+        input_message.insert("phase".to_string(), phase.clone());
+    }
+    input_message.insert("type".to_string(), Value::String("message".to_string()));
+
+    let mut input_message = Value::Object(input_message);
     let is_assistant = role == "assistant";
 
-    // Responses API requires "type": "message" on each input item
-    if let Some(obj) = msg.as_object_mut() {
-        if !obj.contains_key("type") {
-            obj.insert("type".to_string(), Value::String("message".to_string()));
-        }
-    }
-
-    let has_content = msg
+    let has_content = input_message
         .get("content")
         .is_some_and(|content| !content.is_null() && content != "");
     if has_content {
-        if let Some(content) = msg.get_mut("content") {
+        if let Some(content) = input_message.get_mut("content") {
             if let Some(parts) = content.as_array_mut() {
                 for part in parts.iter_mut() {
                     let Some(obj) = part.as_object_mut() else {
@@ -169,7 +172,7 @@ fn convert_message_to_input_items(msg: &Value) -> Vec<Value> {
                 }
             }
         }
-        items.push(msg.clone());
+        items.push(input_message.clone());
     }
 
     if let Some(tool_calls) = msg.get("tool_calls").and_then(Value::as_array) {
@@ -198,7 +201,7 @@ fn convert_message_to_input_items(msg: &Value) -> Vec<Value> {
     }
 
     if items.is_empty() {
-        items.push(msg);
+        items.push(input_message);
     }
     items
 }
@@ -1051,6 +1054,33 @@ mod tests {
                 field
             );
         }
+    }
+
+    #[test]
+    fn test_chat_to_responses_strips_unsupported_message_fields() {
+        let body = serde_json::json!({
+            "model": "gpt-5-codex",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": "previous answer",
+                    "phase": "final_answer",
+                    "name": "weixin-agent",
+                    "reasoning_content": "provider-specific reasoning"
+                }
+            ]
+        });
+        let result = chat_completions_to_responses(body.to_string().as_bytes()).unwrap();
+        let parsed: Value = serde_json::from_slice(&result).unwrap();
+        let assistant = &parsed["input"][1];
+
+        assert_eq!(assistant["type"], "message");
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["content"], "previous answer");
+        assert_eq!(assistant["phase"], "final_answer");
+        assert!(assistant.get("name").is_none());
+        assert!(assistant.get("reasoning_content").is_none());
     }
 
     #[test]
