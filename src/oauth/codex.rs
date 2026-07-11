@@ -462,6 +462,7 @@ async fn wait_for_oauth_callback(
 /// - Strip provider prefix from model (e.g. "openai/gpt-5.2-codex" → "gpt-5.2-codex")
 /// - Set `store: false` (required by ChatGPT backend)
 /// - Set `stream: true` (required by ChatGPT backend)
+/// - Supply Codex Responses defaults that native Codex clients normally send.
 fn fixup_for_chatgpt_backend(body: &[u8]) -> Vec<u8> {
     let Ok(mut parsed) = serde_json::from_slice::<serde_json::Value>(body) else {
         return body.to_vec();
@@ -476,8 +477,91 @@ fn fixup_for_chatgpt_backend(body: &[u8]) -> Vec<u8> {
     // Codex backend does not support max_output_tokens
     if let Some(obj) = parsed.as_object_mut() {
         obj.remove("max_output_tokens");
+        apply_codex_responses_defaults(obj);
     }
     serde_json::to_vec(&parsed).unwrap_or_else(|_| body.to_vec())
+}
+
+fn apply_codex_responses_defaults(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    let mut remove_reasoning = false;
+    let reasoning_enabled = match obj.get_mut("reasoning") {
+        Some(reasoning) if !reasoning.is_object() => {
+            *reasoning = serde_json::json!({"effort": "medium", "summary": "auto"});
+            true
+        }
+        Some(reasoning) => {
+            let reasoning = reasoning
+                .as_object_mut()
+                .expect("object reasoning was checked above");
+            let reasoning_disabled = reasoning
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+                || reasoning
+                    .get("effort")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|effort| effort == "none");
+            if reasoning_disabled {
+                remove_reasoning = true;
+                false
+            } else {
+                reasoning.remove("enabled");
+                if reasoning
+                    .get("effort")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|effort| effort == "minimal")
+                {
+                    reasoning.insert(
+                        "effort".to_string(),
+                        serde_json::Value::String("low".to_string()),
+                    );
+                }
+                reasoning
+                    .entry("effort".to_string())
+                    .or_insert_with(|| serde_json::Value::String("medium".to_string()));
+                reasoning
+                    .entry("summary".to_string())
+                    .or_insert_with(|| serde_json::Value::String("auto".to_string()));
+                true
+            }
+        }
+        None => {
+            obj.insert(
+                "reasoning".to_string(),
+                serde_json::json!({"effort": "medium", "summary": "auto"}),
+            );
+            true
+        }
+    };
+    if remove_reasoning {
+        obj.remove("reasoning");
+    }
+
+    if !obj.contains_key("include") {
+        let include = if reasoning_enabled {
+            serde_json::json!(["reasoning.encrypted_content"])
+        } else {
+            serde_json::json!([])
+        };
+        obj.insert("include".to_string(), include);
+    }
+
+    let has_tools = obj
+        .get("tools")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|tools| !tools.is_empty());
+    if has_tools && !obj.contains_key("tool_choice") {
+        obj.insert(
+            "tool_choice".to_string(),
+            serde_json::Value::String("auto".to_string()),
+        );
+    }
+    if has_tools && !obj.contains_key("parallel_tool_calls") {
+        obj.insert(
+            "parallel_tool_calls".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -693,5 +777,81 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
         assert_eq!(parsed["model"], "gpt-4o-mini");
         assert_eq!(parsed["store"], false);
+    }
+
+    #[test]
+    fn test_fixup_sets_codex_responses_defaults_for_tools() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "gpt-5.3-codex",
+            "input": [{"role": "user", "content": "inspect the repo"}],
+            "tools": [{"type": "function", "name": "terminal"}]
+        }))
+        .unwrap();
+        let result = fixup_for_chatgpt_backend(&body);
+        let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
+
+        assert_eq!(
+            parsed["reasoning"],
+            serde_json::json!({"effort": "medium", "summary": "auto"})
+        );
+        assert_eq!(
+            parsed["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(parsed["tool_choice"], "auto");
+        assert_eq!(parsed["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn test_fixup_preserves_explicit_codex_responses_controls() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "gpt-5.3-codex",
+            "input": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "name": "terminal"}],
+            "include": [],
+            "tool_choice": "required",
+            "parallel_tool_calls": false,
+            "reasoning": {"enabled": true, "effort": "high", "summary": "auto"}
+        }))
+        .unwrap();
+        let result = fixup_for_chatgpt_backend(&body);
+        let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
+
+        assert_eq!(
+            parsed["reasoning"],
+            serde_json::json!({"effort": "high", "summary": "auto"})
+        );
+        assert_eq!(parsed["include"], serde_json::json!([]));
+        assert_eq!(parsed["tool_choice"], "required");
+        assert_eq!(parsed["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn test_fixup_normalizes_chat_reasoning_controls_for_codex() {
+        let disabled_body = serde_json::to_vec(&serde_json::json!({
+            "model": "gpt-5.3-codex",
+            "input": [{"role": "user", "content": "hi"}],
+            "reasoning": {"effort": "none"}
+        }))
+        .unwrap();
+        let disabled_result = fixup_for_chatgpt_backend(&disabled_body);
+        let disabled: serde_json::Value = serde_json::from_slice(&disabled_result).unwrap();
+
+        assert!(disabled.get("reasoning").is_none());
+        assert_eq!(disabled["include"], serde_json::json!([]));
+
+        let minimal_body = serde_json::to_vec(&serde_json::json!({
+            "model": "gpt-5.3-codex",
+            "input": [{"role": "user", "content": "hi"}],
+            "reasoning": {"enabled": true, "effort": "minimal"}
+        }))
+        .unwrap();
+        let minimal_result = fixup_for_chatgpt_backend(&minimal_body);
+        let minimal: serde_json::Value = serde_json::from_slice(&minimal_result).unwrap();
+
+        assert_eq!(
+            minimal["reasoning"],
+            serde_json::json!({"effort": "low", "summary": "auto"})
+        );
     }
 }

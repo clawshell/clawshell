@@ -20,7 +20,19 @@ pub enum TranslateError {
 }
 
 /// Fields that are compatible between chat/completions and responses API.
-const PASSTHROUGH_FIELDS: &[&str] = &["model", "stream", "top_p", "stop"];
+///
+/// Some clients attach Responses-compatible fields as chat-completions
+/// `extra_body` values when they are talking through a compatibility proxy.
+const PASSTHROUGH_FIELDS: &[&str] = &[
+    "model",
+    "stream",
+    "top_p",
+    "stop",
+    "include",
+    "parallel_tool_calls",
+    "prompt_cache_key",
+    "reasoning",
+];
 
 /// Fields that must be stripped from chat/completions requests (not supported by responses API).
 const STRIP_FIELDS: &[&str] = &[
@@ -1092,7 +1104,11 @@ mod tests {
             "stream_options": {"include_usage": true},
             "temperature": 0.7,
             "top_p": 0.9,
-            "stop": ["\n"]
+            "stop": ["\n"],
+            "include": ["reasoning.encrypted_content"],
+            "parallel_tool_calls": false,
+            "prompt_cache_key": "session-123",
+            "reasoning": {"effort": "high"}
         });
         let result = chat_completions_to_responses(body.to_string().as_bytes()).unwrap();
         let parsed: Value = serde_json::from_slice(&result).unwrap();
@@ -1103,6 +1119,13 @@ mod tests {
         assert!(parsed.get("temperature").is_none());
         assert_eq!(parsed["top_p"], 0.9);
         assert_eq!(parsed["stop"], serde_json::json!(["\n"]));
+        assert_eq!(
+            parsed["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(parsed["parallel_tool_calls"], false);
+        assert_eq!(parsed["prompt_cache_key"], "session-123");
+        assert_eq!(parsed["reasoning"], serde_json::json!({"effort": "high"}));
     }
 
     #[test]
