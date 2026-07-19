@@ -139,7 +139,7 @@ openai_base_url = "https://api.openai.com"
         let stats = table.get("stats").unwrap().as_table().unwrap();
         assert_eq!(
             stats.get("persist_path").unwrap().as_str().unwrap(),
-            "/etc/clawshell/stats.json"
+            "/var/lib/clawshell/stats.json"
         );
     }
 

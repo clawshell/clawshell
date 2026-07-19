@@ -49,6 +49,7 @@ AmbientCapabilities=
 RestrictAddressFamilies=AF_INET AF_INET6
 UMask=0077
 ReadOnlyPaths=/etc/clawshell
+ReadWritePaths=/var/lib/clawshell
 StandardOutput=append:/var/log/clawshell/clawshell.log
 StandardError=append:/var/log/clawshell/clawshell.log
 
@@ -221,6 +222,8 @@ mod tests {
         assert!(content.contains("WantedBy=multi-user.target"));
         assert!(content.contains("StandardOutput=append:/var/log/clawshell/clawshell.log"));
         assert!(content.contains("StandardError=append:/var/log/clawshell/clawshell.log"));
+        assert!(content.contains("ReadOnlyPaths=/etc/clawshell"));
+        assert!(content.contains("ReadWritePaths=/var/lib/clawshell"));
     }
 
     #[test]

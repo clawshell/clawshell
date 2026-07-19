@@ -40,7 +40,7 @@ provider = "anthropic"
 
 # Data Loss Prevention (DLP)
 # Each pattern has a name, a regex, and an action.
-# action = "redact" (default): Reject the request with 400 Bad Request.
+# action = "block" (default): Reject the request with 400 Bad Request.
 # action = "redact": Replace matches with [REDACTED:<name>] and forward.
 # scan_responses: When true, upstream responses are also scanned and PII is redacted.
 [dlp]
@@ -58,7 +58,7 @@ patterns = [
 # tokens (from non-streaming responses), and per-sender email-filter
 # activity, and exposes them at GET /admin/stats (loopback-only).
 [stats]
-persist_path = "/etc/clawshell/stats.json"
+persist_path = "/var/lib/clawshell/stats.json"
 
 # Email read endpoint
 # If enabled, set exactly one mode:

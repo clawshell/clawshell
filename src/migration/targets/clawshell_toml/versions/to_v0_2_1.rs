@@ -16,7 +16,7 @@ pub fn apply(
         let mut stats = toml::value::Table::new();
         stats.insert(
             "persist_path".to_string(),
-            toml::Value::String("/etc/clawshell/stats.json".to_string()),
+            toml::Value::String("/var/lib/clawshell/stats.json".to_string()),
         );
         table.insert("stats".to_string(), toml::Value::Table(stats));
         output.applied_steps.push(STEP_ID.to_string());
@@ -62,7 +62,7 @@ openai_base_url = "https://api.openai.com"
         let stats = table.get("stats").unwrap().as_table().unwrap();
         assert_eq!(
             stats.get("persist_path").unwrap().as_str().unwrap(),
-            "/etc/clawshell/stats.json"
+            "/var/lib/clawshell/stats.json"
         );
     }
 
