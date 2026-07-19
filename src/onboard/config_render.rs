@@ -78,7 +78,7 @@ patterns = [
 ]
 
 [stats]
-persist_path = "/etc/clawshell/stats.json"
+persist_path = "/var/lib/clawshell/stats.json"
 {oauth_providers_section}"#,
         version = env!("CARGO_PKG_VERSION"),
         host = config.server_host,
@@ -156,7 +156,7 @@ mod tests {
         assert!(toml_str.contains(&format!("version = \"{}\"", env!("CARGO_PKG_VERSION"))));
         assert!(toml_str.contains("[dlp]"));
         assert!(toml_str.contains("[stats]"));
-        assert!(toml_str.contains("persist_path ="));
+        assert!(toml_str.contains("persist_path = \"/var/lib/clawshell/stats.json\""));
         assert!(!toml_str.contains("[email]"));
         assert!(!toml_str.contains("[rate_limit]"));
     }

@@ -1457,11 +1457,13 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
     // Step 2: Create necessary directories
     let config_dir = PathBuf::from("/etc/clawshell");
     let log_dir_path = PathBuf::from("/var/log/clawshell");
+    let state_dir_path = PathBuf::from("/var/lib/clawshell");
 
     tui::print_step(2, TOTAL_STEPS, "Setting up directories...");
 
     std::fs::create_dir_all(&config_dir)?;
     std::fs::create_dir_all(&log_dir_path)?;
+    std::fs::create_dir_all(&state_dir_path)?;
     tui::print_step_done(2, TOTAL_STEPS, "Directories created");
 
     // Step 3: Set permissions and ownership
@@ -1486,6 +1488,13 @@ fn cmd_onboard() -> Result<(), Box<dyn std::error::Error>> {
             error = %error,
             path = %log_dir_path.display(),
             "Failed to set log directory owner"
+        );
+    }
+    if let Err(error) = platform::set_owner(&state_dir_path, true) {
+        warn!(
+            error = %error,
+            path = %state_dir_path.display(),
+            "Failed to set state directory owner"
         );
     }
     tui::print_step_done(3, TOTAL_STEPS, "Permissions set");
