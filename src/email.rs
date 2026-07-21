@@ -997,15 +997,8 @@ pub fn extract_sender_address(from_header: &str) -> Option<String> {
         return None;
     }
 
-    if let Some((start, end)) = from_header
-        .rfind('<')
-        .zip(from_header.rfind('>'))
-        .filter(|(start, end)| start < end)
-    {
-        let candidate = from_header[start + 1..end].trim();
-        if candidate.contains('@') {
-            return Some(candidate.to_ascii_lowercase());
-        }
+    if let Some(candidate) = extract_bracketed_address(from_header) {
+        return Some(candidate);
     }
 
     from_header.split_whitespace().find_map(|token| {
@@ -1016,6 +1009,53 @@ pub fn extract_sender_address(from_header: &str) -> Option<String> {
             None
         }
     })
+}
+
+/// Locates the `<addr-spec>` portion of a From header per RFC 5322
+/// (`mailbox = [display-name] "<" addr-spec ">"`), ignoring any `<`/`>`
+/// characters that appear inside a quoted display-name.
+///
+/// A naive "take the last `<...>` pair in the header" search can be fooled
+/// by a display-name that itself contains bracketed text, e.g.:
+///
+/// `<alice@trusted.org> "Bob <fake@evil.com>"`
+///
+/// Here the real sender is `alice@trusted.org`, but a last-bracket search
+/// returns the decoy `fake@evil.com` from inside the quoted string, which
+/// would let a crafted display-name bypass sender allowlist/denylist
+/// filtering. This scans left-to-right, tracks whether it is inside a
+/// double-quoted quoted-string (respecting backslash-escapes), and only
+/// treats unquoted `<`/`>` as address delimiters.
+fn extract_bracketed_address(from_header: &str) -> Option<String> {
+    let mut in_quotes = false;
+    let mut start = None;
+    let mut chars = from_header.char_indices().peekable();
+
+    while let Some((i, ch)) = chars.next() {
+        match ch {
+            '\\' if in_quotes => {
+                // Skip an escaped character inside a quoted-string so an
+                // escaped quote (`\"`) doesn't flip `in_quotes`.
+                chars.next();
+            }
+            '"' => in_quotes = !in_quotes,
+            '<' if !in_quotes && start.is_none() => start = Some(i),
+            '>' if !in_quotes => {
+                if let Some(s) = start {
+                    let candidate = from_header[s + 1..i].trim();
+                    if candidate.contains('@') {
+                        return Some(candidate.to_ascii_lowercase());
+                    }
+                    // Not a real address (empty, or no '@') — keep scanning
+                    // in case another unquoted bracket pair follows.
+                    start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 pub fn sender_matches_rule(sender_email: &str, rule: &str) -> bool {
@@ -1045,6 +1085,36 @@ mod tests {
     fn test_extract_sender_address_plain_email() {
         let sender = extract_sender_address("user@example.com").unwrap();
         assert_eq!(sender, "user@example.com");
+    }
+
+    #[test]
+    fn test_extract_sender_address_ignores_bracket_in_quoted_display_name_after() {
+        // Real address comes first; a quoted display-name *after* it
+        // contains a decoy bracketed address. A naive "last bracket pair"
+        // search would wrongly return the decoy.
+        let sender =
+            extract_sender_address(r#"<alice@trusted.org> "Bob <fake@evil.com>""#).unwrap();
+        assert_eq!(sender, "alice@trusted.org");
+    }
+
+    #[test]
+    fn test_extract_sender_address_ignores_bracket_in_quoted_display_name_before() {
+        // Decoy comes first inside the quoted display-name, real address
+        // follows — this direction already worked before the fix, kept as
+        // a regression guard.
+        let sender =
+            extract_sender_address(r#""Bob <fake@evil.com>" <alice@trusted.org>"#).unwrap();
+        assert_eq!(sender, "alice@trusted.org");
+    }
+
+    #[test]
+    fn test_extract_sender_address_handles_escaped_quote_in_display_name() {
+        // An escaped quote inside the display-name shouldn't flip the
+        // "in a quoted-string" state early and expose the decoy bracket.
+        let sender =
+            extract_sender_address(r#""Bob \"the < sign\" <fake@evil.com>" <alice@trusted.org>"#)
+                .unwrap();
+        assert_eq!(sender, "alice@trusted.org");
     }
 
     #[test]
