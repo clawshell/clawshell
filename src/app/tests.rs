@@ -2068,6 +2068,102 @@ fn test_ensure_stream_options_skips_anthropic() {
     assert!(result.is_none());
 }
 
+#[tokio::test]
+async fn test_request_rejects_content_encoding() {
+    let mock_server = MockServer::start().await;
+    let app = make_app(&mock_server.uri());
+
+    let body = r#"{"model":"gpt-4","messages":[]}"#;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk-test-1")
+        .header("content-type", "application/json")
+        .header("content-encoding", "gzip")
+        .body(Body::from(body))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_request_allows_identity_content_encoding() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+        .mount(&mock_server)
+        .await;
+
+    let app = make_app(&mock_server.uri());
+    let body = r#"{"model":"gpt-4","messages":[]}"#;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk-test-1")
+        .header("content-type", "application/json")
+        .header("content-encoding", "identity")
+        .body(Body::from(body))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_forwards_identity_accept_encoding_upstream() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("accept-encoding", "identity"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+        .mount(&mock_server)
+        .await;
+
+    let app = make_app(&mock_server.uri());
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/models")
+        .header("authorization", "Bearer vk-test-1")
+        .header("accept-encoding", "gzip")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_response_scan_fails_closed_on_compressed_body() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-encoding", "gzip")
+                .set_body_bytes(vec![0x1f, 0x8b, 0x08, 0x00]),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let app = make_app_with_redact(&mock_server.uri());
+    let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", "Bearer vk-test-1")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+}
+
 #[test]
 fn test_ensure_stream_options_preserves_existing() {
     use crate::config::Provider;
