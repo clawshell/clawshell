@@ -566,6 +566,19 @@ async fn handle_request(
         "Key resolved successfully"
     );
 
+    if header_has_non_identity_encoding(&headers, "content-encoding") {
+        warn!(
+            method = %method,
+            path = %path,
+            virtual_key = %virtual_key,
+            "Rejected request with unscannable Content-Encoding"
+        );
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "Content-Encoding not supported; send an identity-encoded body",
+        ));
+    }
+
     // 2. Read the body
     let body_bytes: Bytes = body
         .collect()
@@ -746,6 +759,21 @@ async fn handle_request(
     } else {
         response
     };
+
+    if state.dlp_scanner.scan_responses()
+        && header_has_non_identity_encoding(response.headers(), "content-encoding")
+    {
+        error!(
+            method = %method,
+            path = %path,
+            virtual_key = %virtual_key,
+            "Upstream response is compressed and cannot be scanned; failing closed"
+        );
+        return Err(error_response(
+            StatusCode::BAD_GATEWAY,
+            "Upstream response could not be scanned",
+        ));
+    }
 
     // 5. Response processing.
     // Non-streaming responses are buffered so we can (a) record upstream
@@ -1122,6 +1150,19 @@ fn ensure_stream_options(body: &[u8], provider: Provider) -> Option<Vec<u8>> {
         serde_json::json!({"include_usage": true}),
     );
     serde_json::to_vec(&json).ok()
+}
+
+fn header_has_non_identity_encoding(headers: &HeaderMap, name: &str) -> bool {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .any(|token| !token.eq_ignore_ascii_case("identity"))
+        })
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {

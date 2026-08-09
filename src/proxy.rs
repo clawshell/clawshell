@@ -250,6 +250,7 @@ fn filter_hop_by_hop_headers(headers: &HeaderMap) -> HeaderMap {
             || name_str == "connection"
             || name_str == "content-length"
             || name_str == "transfer-encoding"
+            || name_str == "accept-encoding"
             || name_str == "x-api-key"
         {
             trace!(header = %name_str, "Skipping hop-by-hop/auth header");
@@ -257,6 +258,10 @@ fn filter_hop_by_hop_headers(headers: &HeaderMap) -> HeaderMap {
         }
         filtered.insert(name.clone(), value.clone());
     }
+    filtered.insert(
+        axum::http::header::ACCEPT_ENCODING,
+        HeaderValue::from_static("identity"),
+    );
     filtered
 }
 
@@ -384,5 +389,27 @@ mod tests {
         assert!(filtered.get("host").is_none());
         assert!(filtered.get("content-type").is_some());
         assert!(filtered.get("x-custom").is_some());
+    }
+
+    #[test]
+    fn test_filter_forces_identity_accept_encoding() {
+        let mut headers = HeaderMap::new();
+        headers.insert("accept-encoding", "gzip, br".parse().unwrap());
+
+        let filtered = filter_hop_by_hop_headers(&headers);
+        assert_eq!(
+            filtered.get("accept-encoding").unwrap().to_str().unwrap(),
+            "identity"
+        );
+    }
+
+    #[test]
+    fn test_filter_sets_identity_when_absent() {
+        let headers = HeaderMap::new();
+        let filtered = filter_hop_by_hop_headers(&headers);
+        assert_eq!(
+            filtered.get("accept-encoding").unwrap().to_str().unwrap(),
+            "identity"
+        );
     }
 }
